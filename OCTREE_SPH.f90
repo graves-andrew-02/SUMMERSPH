@@ -3,6 +3,10 @@ module octree_module
   real, parameter :: G = 6.67430e-11
   real, parameter :: softening = 1.0e-5
   integer, parameter :: dp = kind(1.0d0)
+  integer, parameter :: nq = 10000  ! Number of samples between q = 0 and q = 2
+  real(dp), allocatable :: w_table(:), dw_table(:)
+  real(dp), parameter :: dq = 2.0_dp / nq
+  
 
   !types here act like dictionaries with "sets" of arrays
   type :: particle
@@ -22,16 +26,58 @@ module octree_module
     type(branch), allocatable :: children(:)
   end type branch
 
-  type :: kkgrad !information on the kernel and grad(kernel)
-    real(dp), allocatable :: k(:)
-    real(dp), allocatable, dimension(3) :: kgrad(:,:)
-  end type kkgrad
-
-  type :: settings
-    real(dp) :: dt, scale_dt, size
-  end type settings
-
   contains
+
+  subroutine init_kernel_table()
+    integer :: i
+    real(dp) :: q
+
+    allocate(w_table(0:nq))
+    allocate(dw_table(0:nq))
+
+    do i = 0, nq
+      q = i * dq
+      if (q >= 0.0_dp .and. q <= 1.0_dp) then
+        w_table(i) = 1.0_dp - 1.5_dp*q**2 + 0.75_dp*q**3
+        dw_table(i) = -3.0_dp*q + 2.25_dp*q**2
+      else if (q > 1.0_dp .and. q <= 2.0_dp) then
+        w_table(i) = 0.25_dp * (2.0_dp - q)**3
+        dw_table(i) = -0.75_dp * (2.0_dp - q)**2
+      else
+        w_table(i) = 0.0_dp
+        dw_table(i) = 0.0_dp
+      end if
+    end do
+  end subroutine init_kernel_table
+
+  subroutine lookup_kernel(r, hi, hj, Wi, dWi, Wj, dWj)
+    real(dp), intent(in) :: r, hi, hj
+    real(dp), intent(out) :: Wi, dWi, Wj, dWj
+    integer :: i
+    real(dp) :: alpha, qi, qj
+
+    qi = r / hi
+    if (qi >= 0.0_dp .and. qi <= 2.0_dp) then
+      i = int(qi / dq)
+      alpha = (qi - i * dq) / dq
+      Wi = (1.0_dp - alpha) * w_table(i) + alpha * w_table(i+1)
+      dWi = (1.0_dp - alpha) * dw_table(i) + alpha * dw_table(i+1)
+    else
+      Wi = 0.0_dp
+      dWi = 0.0_dp
+    end if
+
+    qi = r / hj
+    if (qj >= 0.0_dp .and. qj <= 2.0_dp) then
+      i = int(qj / dq)
+      alpha = (qj - i * dq) / dq
+      Wj = (1.0_dp - alpha) * w_table(i) + alpha * w_table(i+1)
+      dWj = (1.0_dp - alpha) * dw_table(i) + alpha * dw_table(i+1)
+    else
+      Wj = 0.0_dp
+      dWj = 0.0_dp
+    end if
+  end subroutine lookup_kernel
 
   ! All this does is check an volume for particles, then subdivide into 8
   ! and allocate particles to the right octant, nothing more 
@@ -140,59 +186,14 @@ module octree_module
   end do
   end subroutine navigate_tree
 
-  ! Used by the kernel_thing subroutine when actually smoothing all particles
-subroutine cubic_spline(body, node, w)
-  implicit none
-  type(particle), intent(in) :: body
-  type(branch), intent(in) :: node
-  type(kkgrad), intent(inout) :: w
-
-  integer :: i, n
-  real(dp) :: r, h, q, norm
-  real(dp), dimension(3) :: dr
-
-  n = node%n_particles
-  if (n == 0) return
-
-  ! Allocate memory for kernel weights and gradients
-  allocate(w%k(n))
-  allocate(w%kgrad(3, n))
-
-  h = body%smoothing
-  norm = 1.0_dp / (3.14159265359_dp * h**3)
-
-  do i = 1, n
-    dr = body%position - node%particles(i)%position
-    r = sqrt(sum(dr**2))
-    if (r == 0.0_dp) then
-      q = 0.0_dp
-    else
-      q = r / h
-    end if
-
-    !smoothing kernel and its gradient
-    if (q >= 0.0_dp .and. q <= 1.0_dp) then
-      w%k(i) = norm * (1.0_dp - 1.5_dp*q**2 + 0.75_dp*q**3)
-      w%kgrad(:,i) = (dr/r) * norm * (-3.0_dp*q/h + 2.25_dp*q**2/h)
-    else if (q > 1.0_dp .and. q <= 2.0_dp) then
-      w%k(i) = norm * 0.25_dp * (2.0_dp - q)**3
-      w%kgrad(:,i) = (dr/r) * norm * (-0.75_dp * (2.0_dp - q)**2 / h)
-    else
-      w%k(i) = 0.0_dp
-      w%kgrad(:,i) = 0.0_dp
-    end if
-  end do
-
-end subroutine cubic_spline
-
 ! Navigates the tree to get to the nodes within 2h of each particle
 recursive subroutine kernel_thing(node, body)
   implicit none
   type(branch), intent(in) :: node
   type(particle), intent(inout) :: body(:)
-  real(dp) :: com_dist
-  integer :: i, k
-  type(kkgrad) :: w
+  real(dp) :: com_dist, dr, Wi, Wj, dWi_mag, dWj_mag
+  real(dp), dimension(3) :: nr, dWi, dWj
+  integer :: i, j, k
   logical :: has_children
 
   has_children = allocated(node%children)
@@ -200,17 +201,22 @@ recursive subroutine kernel_thing(node, body)
   do i = 1, size(body)
     com_dist = sqrt(sum((body(i)%position - node%mass_center)**2))
 
-    if (node%n_particles > 0 .and. com_dist < 0.70710678118_dp * node%size .and. com_dist < 4 * body(i)%smoothing) then
-      ! Evaluate SPH forces
-      call cubic_spline(body(i), node, w)
-      !print *, w%k(:)
-      ! Deallocate after use
-      if (allocated(w%k)) deallocate(w%k)
-      if (allocated(w%kgrad)) deallocate(w%kgrad)
+    if (node%n_particles > 0 .and. com_dist < 0.70710678118_dp * node%size .and. com_dist < 2 * body(i)%smoothing) then
+      do j = 1, node%n_particles
+        !SPH forces/ kernel calc
+        nr = (body(i)%position - node%particles(j)%position)
+        dr = sqrt(sum(nr**2)) !might need to switch i and j
+        nr = nr / dr
+        call lookup_kernel(dr, body(i)%smoothing, node%particles(j)%smoothing, Wi, dWi_mag, Wj, dWj_mag)
+        Wi = Wi / (3.14159265359_dp * body(i)%smoothing**3) 
+        Wj = Wj / (3.14159265359_dp * node%particles(j)%smoothing**3) 
 
-      return
+        dWi = nr * dWi_mag / (3.14159265359_dp * body(i)%smoothing**4)
+        dWj = - nr * dWj_mag / (3.14159265359_dp * node%particles(j)%smoothing**4)
+
+        !print *, dWi-dWj
+      end do
     else if (has_children .and. com_dist < 2 * body(i)%smoothing) then
-      ! Recurse through children
       do k = 1, size(node%children)
         call kernel_thing(node%children(k), body(i:i))
       end do
@@ -230,9 +236,10 @@ program barnes_hut
   type(particle), allocatable :: bodies(:)
   type(branch), allocatable :: root
 
+  call init_kernel_table()
 
   !make some random points
-  total_particles = 5000
+  total_particles = 2000
   allocate(bodies(total_particles))
 
   do n = 1, total_particles
@@ -240,7 +247,7 @@ program barnes_hut
     bodies(n)%position = 300.0_dp * bodies(n)%position ! Scale to a range
     bodies(n)%mass = 100.0_dp
     bodies(n)%velocity = [0.0_dp, 0.0_dp, 0.0_dp]
-    bodies(n)%smoothing = 140.0_dp
+    bodies(n)%smoothing = 1.0_dp
     bodies(n)%pressure = 1.0_dp
   end do
 
@@ -266,9 +273,12 @@ program barnes_hut
   end do
   call cpu_time(time_f)
   print *, 'program finished', time_f - time_i
-  print *, '30day real to', (86400 * 10 * 30 / (time_f - time_i)) / 365.25 , ' years in sim'
+  print *, '1day real to', (86400 * 10 / (time_f - time_i)) / 365.25 , ' years in sim'
 
   
 end program barnes_hut
+
+
+
 
 
