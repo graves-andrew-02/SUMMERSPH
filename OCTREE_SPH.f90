@@ -3,14 +3,15 @@ module octree_module
   real, parameter :: G = 6.67430e-11
   real, parameter :: softening = 1.0e-5
   integer, parameter :: dp = kind(1.0d0)
-  integer, parameter :: nq = 10000  ! Number of samples between q = 0 and q = 2
+  integer, parameter :: nq = 1000  ! Number of samples between q = 0 and q = 2
   real(dp), allocatable :: w_table(:), dw_table(:)
   real(dp), parameter :: dq = 2.0_dp / nq
-  
+
 
   !types here act like dictionaries with "sets" of arrays
   type :: particle
     real(dp) :: mass, density, internal_energy, pressure, smoothing
+    real(dp) :: density_rate, internal_energy_rate, pressure_rate
     real(dp), dimension(3) :: position
     real(dp), dimension(3) :: velocity
     real(dp), dimension(3) :: acceleration
@@ -27,7 +28,6 @@ module octree_module
   end type branch
 
   contains
-
   subroutine init_kernel_table()
     integer :: i
     real(dp) :: q
@@ -50,11 +50,11 @@ module octree_module
     end do
   end subroutine init_kernel_table
 
-  subroutine lookup_kernel(r, hi, hj, Wi, dWi, Wj, dWj)
-    real(dp), intent(in) :: r, hi, hj
-    real(dp), intent(out) :: Wi, dWi, Wj, dWj
+  subroutine lookup_kernel(r, hi, Wi, dWi)
+    real(dp), intent(in) :: r, hi
+    real(dp), intent(out) :: Wi, dWi
     integer :: i
-    real(dp) :: alpha, qi, qj
+    real(dp) :: alpha, qi
 
     qi = r / hi
     if (qi >= 0.0_dp .and. qi <= 2.0_dp) then
@@ -66,21 +66,10 @@ module octree_module
       Wi = 0.0_dp
       dWi = 0.0_dp
     end if
-
-    qi = r / hj
-    if (qj >= 0.0_dp .and. qj <= 2.0_dp) then
-      i = int(qj / dq)
-      alpha = (qj - i * dq) / dq
-      Wj = (1.0_dp - alpha) * w_table(i) + alpha * w_table(i+1)
-      dWj = (1.0_dp - alpha) * dw_table(i) + alpha * dw_table(i+1)
-    else
-      Wj = 0.0_dp
-      dWj = 0.0_dp
-    end if
   end subroutine lookup_kernel
 
-  ! All this does is check an volume for particles, then subdivide into 8
-  ! and allocate particles to the right octant, nothing more 
+  !All this does is check an volume for particles, then subdivide into 8
+  !and allocate particles to the right octant, nothing more 
   recursive subroutine build_tree(node, depth, max_particles)
     implicit none
     type(branch), intent(inout) :: node
@@ -191,8 +180,8 @@ recursive subroutine kernel_thing(node, body)
   implicit none
   type(branch), intent(in) :: node
   type(particle), intent(inout) :: body(:)
-  real(dp) :: com_dist, dr, Wi, Wj, dWi_mag, dWj_mag
-  real(dp), dimension(3) :: nr, dWi, dWj
+  real(dp) :: com_dist, dr, Wj, dWj_mag, mj, vdotW
+  real(dp), dimension(3) :: nr, dWj, vij
   integer :: i, j, k
   logical :: has_children
 
@@ -200,22 +189,31 @@ recursive subroutine kernel_thing(node, body)
 
   do i = 1, size(body)
     com_dist = sqrt(sum((body(i)%position - node%mass_center)**2))
-
     if (node%n_particles > 0 .and. com_dist < 0.70710678118_dp * node%size .and. com_dist < 2 * body(i)%smoothing) then
       do j = 1, node%n_particles
         !SPH forces/ kernel calc
         nr = (body(i)%position - node%particles(j)%position)
+        vij = (body(i)%velocity - node%particles(j)%velocity)
         dr = sqrt(sum(nr**2)) !might need to switch i and j
+        if (dr == 0.0_dp) cycle
         nr = nr / dr
-        call lookup_kernel(dr, body(i)%smoothing, node%particles(j)%smoothing, Wi, dWi_mag, Wj, dWj_mag)
-        Wi = Wi / (3.14159265359_dp * body(i)%smoothing**3) 
-        Wj = Wj / (3.14159265359_dp * node%particles(j)%smoothing**3) 
+        call lookup_kernel(dr, body(i)%smoothing,  Wj, dWj_mag)
+        Wj = Wj / (3.14159265359_dp * body(i)%smoothing**3) 
+        dWj = nr * dWj_mag / (3.14159265359_dp * body(i)%smoothing**4)
 
-        dWi = nr * dWi_mag / (3.14159265359_dp * body(i)%smoothing**4)
-        dWj = - nr * dWj_mag / (3.14159265359_dp * node%particles(j)%smoothing**4)
+        mj = node%particles(j)%mass
+        !now do forces and shit
+        !pressure force
+        body(i)%acceleration = body(i)%acceleration - mj * ((body(i)%pressure/(body(i)%density*body(i)%density)) + (node%particles(j)%pressure / (node%particles(j)%density*node%particles(j)%density))) * dWj
 
-        !print *, dWi-dWj
+        !drho/dt
+        vdotW = sum(vij * dWj)
+        body(i)%density_rate = body(i)%density_rate + mj * vdotW
+
+        !rate change in internal energy (might be faster to take out p/rho term and do as a bulk calc after)
+        body(i)%internal_energy_rate = body(i)%internal_energy_rate + (body(i)%pressure/body(i)%density)*mj*(vdotW)
       end do
+
     else if (has_children .and. com_dist < 2 * body(i)%smoothing) then
       do k = 1, size(node%children)
         call kernel_thing(node%children(k), body(i:i))
@@ -225,33 +223,46 @@ recursive subroutine kernel_thing(node, body)
 
 end subroutine kernel_thing
 
+subroutine simulate()
+  implicit none
 
+end subroutine simulate  
 end module octree_module
 
 program barnes_hut
   use octree_module
   implicit none
   integer :: n, total_particles, a
-  real :: time_i, time_f
+  real(dp) :: time_i, time_f, Wi, dWi
   type(particle), allocatable :: bodies(:)
   type(branch), allocatable :: root
 
   call init_kernel_table()
 
   !make some random points
-  total_particles = 2000
+  total_particles = 1000
   allocate(bodies(total_particles))
 
   do n = 1, total_particles
     call random_number(bodies(n)%position) ! Generate random positions
     bodies(n)%position = 300.0_dp * bodies(n)%position ! Scale to a range
-    bodies(n)%mass = 100.0_dp
-    bodies(n)%velocity = [0.0_dp, 0.0_dp, 0.0_dp]
-    bodies(n)%smoothing = 1.0_dp
-    bodies(n)%pressure = 1.0_dp
+    bodies(n)%mass = 10.0_dp
+    call random_number(bodies(n)%velocity)
+    bodies(n)%velocity = 30.0_dp * bodies(n)%velocity
+    bodies(n)%smoothing = 10.0_dp
+    bodies(n)%pressure = 100.0_dp
+    bodies(n)%internal_energy = 1.0_dp
+    bodies(n)%density = 0.0_dp
+  end do
+  do n = 1, total_particles
+    do a = 1, total_particles
+      call lookup_kernel(norm2(bodies(n)%position - bodies(a)%position), bodies(n)%smoothing, Wi, dWi)
+      bodies(n)%density = bodies(n)%density + bodies(a)%mass * Wi / (3.14159265359_dp * bodies(n)%smoothing**3)
+    end do
   end do
 
   !testing the time to perform multiple loops
+
   call cpu_time(time_i)
   do a = 1, 10
     allocate(root)
@@ -263,19 +274,18 @@ program barnes_hut
     root%particles = bodies
 
 
-    call build_tree(root, 100, 1)
+    call build_tree(root, 1000, 1)
 
     
     call navigate_tree(root, bodies, 0.5_dp)
     call kernel_thing(root, bodies)
-    !print *, root%n_particles
     deallocate(root)
   end do
   call cpu_time(time_f)
   print *, 'program finished', time_f - time_i
   print *, '1day real to', (86400 * 10 / (time_f - time_i)) / 365.25 , ' years in sim'
 
-  
+  print *, bodies%acceleration(1)
 end program barnes_hut
 
 
