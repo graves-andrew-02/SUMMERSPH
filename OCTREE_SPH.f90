@@ -5,13 +5,13 @@ module octree_module
   integer, parameter :: dp = kind(1.0d0)
   integer, parameter :: nq = 1000  ! Number of samples between q = 0 and q = 2
   real(dp), allocatable :: w_table(:), dw_table(:)
-  real(dp), parameter :: dq = 2.0_dp / nq
+  real(dp), parameter :: dq = 2.0_dp / nq, smoothing = 10.0_dp
 
 
   !types here act like dictionaries with "sets" of arrays
   type :: particle
-    real(dp) :: mass, density, internal_energy, pressure, smoothing
-    real(dp) :: density_rate, internal_energy_rate, pressure_rate
+    real(dp) :: mass, density, internal_energy, pressure
+    real(dp) :: internal_energy_rate
     real(dp), dimension(3) :: position
     real(dp), dimension(3) :: velocity
     real(dp), dimension(3) :: acceleration
@@ -132,8 +132,6 @@ module octree_module
       node%children(child_index)%n_particles = node%children(child_index)%n_particles + 1
     end do
 
-    !clean up the parent node - THIS BREAKS EVERYTHING IN NEIGHBOUR SEARCH
-    !deallocate(node%particles)
 
     !recursively build children
     do i = 1, 8
@@ -175,72 +173,125 @@ module octree_module
   end do
   end subroutine navigate_tree
 
-! Navigates the tree to get to the nodes within 2h of each particle
-recursive subroutine kernel_thing(node, body)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!PAST THIS POINT THE STUFF WORKS FINE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine get_SPH(root, body)
+  implicit none
+  type(branch), intent(in) :: root
+  type(particle), intent(inout) :: body(:)
+  integer :: i
+
+  do i = 1, size(body)
+    call SPH_tree_search(root, body(i))
+  end do
+end subroutine get_SPH
+
+
+recursive subroutine SPH_tree_search(node, body)
   implicit none
   type(branch), intent(in) :: node
-  type(particle), intent(inout) :: body(:)
-  real(dp) :: com_dist, dr, Wj, dWj_mag, mj, vdotW
-  real(dp), dimension(3) :: nr, dWj, vij
-  integer :: i, j, k
+  type(particle), intent(inout) :: body
+  real(dp), dimension(3) :: over_dr, nr, dWj, vij
+  real(dp) :: Wj, dr, mj, dWj_mag, vdotW
+  integer :: j
   logical :: has_children
 
   has_children = allocated(node%children)
+  !overlaping distance
+  over_dr = (body%position - node%center)  
 
-  do i = 1, size(body)
-    com_dist = sqrt(sum((body(i)%position - node%mass_center)**2))
-    if (node%n_particles > 0 .and. com_dist < 0.70710678118_dp * node%size .and. com_dist < 2 * body(i)%smoothing) then
-      do j = 1, node%n_particles
-        !SPH forces/ kernel calc
-        nr = (body(i)%position - node%particles(j)%position)
-        vij = (body(i)%velocity - node%particles(j)%velocity)
-        dr = sqrt(sum(nr**2)) !might need to switch i and j
-        if (dr == 0.0_dp) cycle
-        nr = nr / dr
-        call lookup_kernel(dr, body(i)%smoothing,  Wj, dWj_mag)
-        Wj = Wj / (3.14159265359_dp * body(i)%smoothing**3) 
-        dWj = nr * dWj_mag / (3.14159265359_dp * body(i)%smoothing**4)
+  if (node%n_particles > 1 .and. all(over_dr < (2*smoothing + node%size/2)) .and. has_children) then
+    do j = 1, size(node%children)
+      call SPH_tree_search(node%children(j), body)
+    end do
 
-        mj = node%particles(j)%mass
-        !now do forces and shit
-        !pressure force
-        body(i)%acceleration = body(i)%acceleration - mj * ((body(i)%pressure/(body(i)%density*body(i)%density)) + (node%particles(j)%pressure / (node%particles(j)%density*node%particles(j)%density))) * dWj
+  else if (node%n_particles == 1 .and. all(over_dr < (2*smoothing + node%size/2))) then
+    !THIS IS JUST ALL THE VECTORS THAT MATTER
+    nr = (body%position - node%particles(1)%position)
+    vij = (body%velocity - node%particles(1)%velocity)
+    dr = sqrt(sum(nr**2)) !might need to switch i and j
+    if (dr == 0.0_dp) return
+    nr = nr / dr
 
-        !drho/dt
-        vdotW = sum(vij * dWj)
-        body(i)%density_rate = body(i)%density_rate + mj * vdotW
+    call lookup_kernel(dr, smoothing,  Wj, dWj_mag)
+    Wj = Wj / (3.14159265359_dp * smoothing**3) 
+    dWj = nr * dWj_mag / (3.14159265359_dp * smoothing**4)
+    mj = node%particles(1)%mass
 
-        !rate change in internal energy (might be faster to take out p/rho term and do as a bulk calc after)
-        body(i)%internal_energy_rate = body(i)%internal_energy_rate + (body(i)%pressure/body(i)%density)*mj*(vdotW)
-      end do
+    
+    !now do forces and shit
+    !pressure force
+    body%acceleration = body%acceleration - mj * ((body%pressure/(body%density * body%density)) + (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density))) * dWj
+    !drho/dt
+    vdotW = sum(vij * dWj)
+    !rate change in internal energy (might be faster to take out p/rho term and do as a bulk calc after)
+    body%internal_energy_rate = body%internal_energy_rate + (body%pressure/body%density)*mj*(vdotW)
+    return
+  end if
+end subroutine SPH_tree_search
 
-    else if (has_children .and. com_dist < 2 * body(i)%smoothing) then
-      do k = 1, size(node%children)
-        call kernel_thing(node%children(k), body(i:i))
-      end do
-    end if
-  end do
 
-end subroutine kernel_thing
-
-subroutine simulate()
+subroutine get_density(root, body)
   implicit none
+  type(branch), intent(inout) :: root
+  type(particle), intent(inout) :: body(:)
+  integer :: i
+  logical :: has_children
 
-end subroutine simulate  
+  has_children = allocated(root%children)
+  do i = 1, size(body)
+    body(i)%density = 0.0_dp
+    call density_tree_search(root, body(i))
+  end do
+end subroutine get_density
+
+
+recursive subroutine density_tree_search(node, body)
+  implicit none
+  type(branch), intent(inout) :: node
+  type(particle), intent(inout) :: body
+  real(dp), dimension(3) :: over_dr, nr
+  real(dp) :: Wj, dr, mj, dWj_mag
+  integer :: j
+  logical :: has_children
+
+  has_children = allocated(node%children)
+  !overlaping distance
+  over_dr = (body%position - node%center)  
+
+  if (node%n_particles > 1 .and. all(over_dr < (2*smoothing + node%size/2)) .and. has_children) then
+    do j = 1, size(node%children)
+      call density_tree_search(node%children(j), body)
+    end do
+
+  else if (node%n_particles == 1 .and. all(over_dr < (2*smoothing + node%size/2))) then
+    nr = (body%position - node%particles(1)%position)
+    dr = sqrt(sum(nr**2)) !might need to switch i and j
+    call lookup_kernel(dr, smoothing,  Wj, dWj_mag)
+    Wj = Wj / (3.14159265359_dp * smoothing**3) 
+    mj = node%particles(1)%mass
+      
+    body%density = body%density + mj * Wj
+    node%particles(1)%density = node%particles(1)%density + mj * Wj
+    return
+  end if
+end subroutine density_tree_search
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 end module octree_module
 
 program barnes_hut
   use octree_module
   implicit none
-  integer :: n, total_particles, a
-  real(dp) :: time_i, time_f, Wi, dWi
+  integer :: n, total_particles
   type(particle), allocatable :: bodies(:)
   type(branch), allocatable :: root
 
   call init_kernel_table()
 
   !make some random points
-  total_particles = 1000
+  total_particles = 3000
   allocate(bodies(total_particles))
 
   do n = 1, total_particles
@@ -249,41 +300,26 @@ program barnes_hut
     bodies(n)%mass = 10.0_dp
     call random_number(bodies(n)%velocity)
     bodies(n)%velocity = 30.0_dp * bodies(n)%velocity
-    bodies(n)%smoothing = 10.0_dp
-    bodies(n)%pressure = 100.0_dp
+    bodies(n)%pressure = 10.0_dp
     bodies(n)%internal_energy = 1.0_dp
     bodies(n)%density = 0.0_dp
   end do
-  do n = 1, total_particles
-    do a = 1, total_particles
-      call lookup_kernel(norm2(bodies(n)%position - bodies(a)%position), bodies(n)%smoothing, Wi, dWi)
-      bodies(n)%density = bodies(n)%density + bodies(a)%mass * Wi / (3.14159265359_dp * bodies(n)%smoothing**3)
-    end do
-  end do
-
-  !testing the time to perform multiple loops
-
-  call cpu_time(time_i)
-  do a = 1, 10
-    allocate(root)
-    ! Initialize root node
-    root%center = [150.0_dp, 150.0_dp, 150.0_dp]
-    root%size = 300.0_dp
-    root%n_particles = size(bodies)
-    allocate(root%particles(size(bodies)))
-    root%particles = bodies
 
 
-    call build_tree(root, 1000, 1)
+  allocate(root)
+  ! Initialize root node
+  root%center = [150.0_dp, 150.0_dp, 150.0_dp]
+  root%size = 300.0_dp
+  root%n_particles = size(bodies)
+  allocate(root%particles(size(bodies)))
+  root%particles = bodies
 
-    
-    call navigate_tree(root, bodies, 0.5_dp)
-    call kernel_thing(root, bodies)
-    deallocate(root)
-  end do
-  call cpu_time(time_f)
-  print *, 'program finished', time_f - time_i
-  print *, '1day real to', (86400 * 10 / (time_f - time_i)) / 365.25 , ' years in sim'
+
+  call build_tree(root, 1000, 1)
+  call get_density(root, bodies)
+  call navigate_tree(root, bodies, 0.5_dp)
+  call get_SPH(root, bodies)
+  deallocate(root)
 
   print *, bodies%acceleration(1)
 end program barnes_hut
