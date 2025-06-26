@@ -232,7 +232,7 @@ recursive subroutine SPH_tree_search(node, body)
   end if
 end subroutine SPH_tree_search
 
-
+!call to find density of all bodies
 subroutine get_density(root, body)
   implicit none
   type(branch), intent(inout) :: root
@@ -279,28 +279,95 @@ recursive subroutine density_tree_search(node, body)
   end if
 end subroutine density_tree_search
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine simulate(bodies)
+  implicit none
+  type(particle), intent(inout) :: bodies(:)
+  type(branch), allocatable :: root
+  real(dp) :: t, dt, end_time
+  integer :: i
+
+  end_time = 1
+  dt = 0.1
+  do while (t < end_time)
+    print *, bodies(1)%position(1),bodies(1)%position(2),bodies(1)%position(3)
+    allocate(root)
+    ! Initialize root node
+    root%center = [150.0_dp, 150.0_dp, 150.0_dp]
+    root%size = 10000.0_dp
+    root%n_particles = size(bodies)
+    allocate(root%particles(size(bodies)))
+    root%particles = bodies
+
+    call build_tree(root, 1000, 1)
+    call get_density(root, bodies)
+    do i = 1, root%n_particles
+      bodies(i)%pressure = (0.66666666666666667) * bodies(i)%internal_energy * bodies(i)%density
+    end do
+
+    call navigate_tree(root, bodies, 0.5_dp)
+    call get_SPH(root, bodies)
+
+    do i = 1, root%n_particles
+      bodies(i)%velocity = bodies(i)%velocity + (bodies(i)%acceleration)*dt/2
+      bodies(i)%internal_energy = bodies(i)%internal_energy + (bodies(i)%internal_energy_rate)*dt/2
+    end do
+
+    do i = 1, root%n_particles
+      bodies(i)%position = bodies(i)%position + (bodies(i)%velocity)*dt/2
+    end do
+    deallocate(root)
+
+    allocate(root)
+    ! Initialize root node
+    root%center = [150.0_dp, 150.0_dp, 150.0_dp]
+    root%size = 10000.0_dp
+    root%n_particles = size(bodies)
+    allocate(root%particles(size(bodies)))
+    root%particles = bodies
+
+    call build_tree(root, 1000, 1)
+    call get_density(root, bodies)
+
+    do i = 1, root%n_particles
+      bodies(i)%pressure = (0.66666666666666667) * bodies(i)%internal_energy * bodies(i)%density
+    end do
+
+    call navigate_tree(root, bodies, 0.5_dp)
+    call get_SPH(root, bodies)
+
+    do i = 1, root%n_particles
+      bodies(i)%velocity = bodies(i)%velocity + (bodies(i)%acceleration)*dt/2
+      bodies(i)%internal_energy = bodies(i)%internal_energy + (bodies(i)%internal_energy_rate)*dt/2
+
+      bodies(i)%position = bodies(i)%position + (bodies(i)%velocity)*dt/2
+    end do
+    deallocate(root)
+    t = t + dt
+  end do
+end subroutine
 end module octree_module
 
 program barnes_hut
   use octree_module
   implicit none
-  integer :: n, total_particles
+  integer :: n, total_particles,i
   type(particle), allocatable :: bodies(:)
   type(branch), allocatable :: root
 
   call init_kernel_table()
 
   !make some random points
-  total_particles = 3000
+  total_particles = 2000
   allocate(bodies(total_particles))
 
   do n = 1, total_particles
     call random_number(bodies(n)%position) ! Generate random positions
-    bodies(n)%position = 300.0_dp * bodies(n)%position ! Scale to a range
-    bodies(n)%mass = 10.0_dp
+    bodies(n)%position = 1000.0_dp * bodies(n)%position ! Scale to a range
+    bodies(n)%mass = 0.1_dp
     call random_number(bodies(n)%velocity)
-    bodies(n)%velocity = 30.0_dp * bodies(n)%velocity
-    bodies(n)%pressure = 10.0_dp
+    bodies(n)%velocity = 0.0_dp * bodies(n)%velocity
+    bodies(n)%pressure = 1.0_dp
     bodies(n)%internal_energy = 1.0_dp
     bodies(n)%density = 0.0_dp
   end do
@@ -309,7 +376,7 @@ program barnes_hut
   allocate(root)
   ! Initialize root node
   root%center = [150.0_dp, 150.0_dp, 150.0_dp]
-  root%size = 300.0_dp
+  root%size = 10000.0_dp
   root%n_particles = size(bodies)
   allocate(root%particles(size(bodies)))
   root%particles = bodies
@@ -317,13 +384,17 @@ program barnes_hut
 
   call build_tree(root, 1000, 1)
   call get_density(root, bodies)
+  do i = 1, root%n_particles
+      bodies(i)%pressure = (0.66666666666666667) * bodies(i)%internal_energy * bodies(i)%density
+  end do
   call navigate_tree(root, bodies, 0.5_dp)
   call get_SPH(root, bodies)
   deallocate(root)
 
-  print *, bodies%acceleration(1)
-end program barnes_hut
 
+  call simulate(bodies)
+  print *, bodies(1)%position(1),bodies(1)%position(2),bodies(1)%position(3)
+end program barnes_hut
 
 
 
