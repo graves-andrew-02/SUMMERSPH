@@ -14,8 +14,7 @@ module octree_module
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq   ! Step size for 'q' (normalized distance) in the kernel lookup tables.
                                            ! 'q' ranges from 0 to 2.
-  real(dp), parameter :: smoothing = 10.0_dp ! SPH smoothing length (h). This defines the radius
-                                             ! over which a particle's properties are averaged from its neighbors.
+  real(dp), parameter :: smoothing = 10.0_dp 
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
@@ -34,15 +33,11 @@ module octree_module
     real(dp), dimension(3) :: center      ! Geometric center of the octree node's bounding box
     real(dp) :: size                     ! Side length of the cubic bounding box for this node
     integer :: n_particles              ! Number of particles contained directly within this node's 'particles' array.
-                                       ! For internal nodes, this is used during tree building to count particles
-                                       ! before distribution to children. For leaf nodes, it's the actual particle count.
     type(Particle), allocatable :: particles(:) ! Array of particles stored in this node.
-                                              ! For internal nodes, these are temporary before distribution.
-                                              ! For leaf nodes, these are the actual particles in that leaf.
     real(dp) :: mass_total               ! Total mass of all particles (or sub-nodes) within this node's bounds
     real(dp), dimension(3) :: mass_center ! Center of mass of all particles (or sub-nodes) within this node's bounds
     type(branch), allocatable :: children(:) ! Array of 8 child branches (sub-nodes) for hierarchical representation.
-                                            ! Allocated only if the node is subdivided.
+
   end type branch
 
   contains
@@ -300,12 +295,10 @@ module octree_module
       body%acceleration = body%acceleration - mj * ((body%pressure/(body%density * body%density)) + &
                                                   (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density))) * dWj
 
-      ! Calculate (v_ij . grad(W_ij)) term for internal energy rate.
       vdotW = sum(vij * dWj)
       ! Accumulate rate of change in internal energy:
-      ! du_i/dt = sum_j m_j (P_i/rho_i^2 + P_j/rho_j^2) (v_ij . grad(W_ij))
       body%internal_energy_rate = body%internal_energy_rate + (body%pressure/body%density)*mj*(vdotW)
-      return ! Interaction with this specific neighbor is complete.
+      return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
   end subroutine SPH_tree_search
@@ -329,10 +322,12 @@ module octree_module
       ! Search the tree to find all neighbors and accumulate density contributions for `body(i)`.
       call density_tree_search(root, body(i))
     end do
+
+    !now distribute the density to the tree
+    call sync_density_to_tree(root, body)
+
   end subroutine get_density
 
-
-  ! Recursive Subroutine: density_tree_search
   ! Recursively traverses the octree to find neighbors for a given 'body' particle
   ! and accumulates its density based on SPH formalism.
   recursive subroutine density_tree_search(node, body)
@@ -351,7 +346,6 @@ module octree_module
     over_dr = (body%position - node%center)
 
     ! Recursion condition:
-    ! If the node contains multiple particles AND the 'body' particle's smoothing sphere
     ! potentially overlaps this node's bounding box, AND the node has children, then recurse.
     if (node%n_particles > 1 .and. all(abs(over_dr) < (2.0_dp*smoothing + node%size/2.0_dp)) .and. has_children) then
       do j = 1, size(node%children)
@@ -369,7 +363,7 @@ module octree_module
       ! Get the neighbor particle from the leaf node (node%particles(1)).
       nr = (body%position - node%particles(1)%position) ! Vector from neighbor to the 'body' particle
       dr = sqrt(sum(nr**2))                             ! Distance between them
-      if (dr == 0.0_dp) return
+      !if (dr == 0.0_dp) return
 
       ! Lookup kernel (W) value for the calculated distance 'dr'.
       call lookup_kernel(dr, smoothing, Wj, dWj_mag) ! dWj_mag is not used for density, but still returned.
@@ -379,12 +373,35 @@ module octree_module
 
       ! Accumulate density for the 'body' particle: rho_i = sum_j m_j * W_ij
       body%density = body%density + mj * Wj
-      node%particles(1)%density = node%particles(1)%density + mj * Wj
-      return ! Interaction with this specific neighbor is complete.
+      return
     end if
-    ! If neither recursion nor leaf node interaction conditions are met, simply return.
   end subroutine density_tree_search
 
+  recursive subroutine sync_density_to_tree(node, bodies)
+    implicit none
+    type(branch), intent(inout) :: node
+    type(particle), intent(in)  :: bodies(:)
+    integer :: i
+
+    ! For each particle in this node, find the corresponding particle in bodies by position and set density
+    do i = 1, size(node%particles)
+      ! Simple approach: assume the i-th particle in node%particles corresponds to i-th in bodies
+      ! (if you always copy bodies into root%particles in order)
+      node%particles(i)%density = bodies(i)%density
+      node%particles(i)%pressure = (0.66666666666666667_dp) * bodies(i)%internal_energy * bodies(i)%density
+
+      if (node%particles(i)%density == 0.0_dp) stop
+    end do
+
+    ! Recurse into children if present
+    if (allocated(node%children)) then
+      do i = 1, size(node%children)
+        if (node%children(i)%n_particles > 0) then
+          call sync_density_to_tree(node%children(i), bodies)
+        end if
+      end do
+    end if
+  end subroutine sync_density_to_tree
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
   ! Subroutine: simulate
@@ -396,17 +413,14 @@ module octree_module
     type(particle), intent(inout) :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     real(dp) :: t, dt, end_time                ! Current simulation time, time step size, and simulation end time.
-    integer :: i                               ! Loop index.
+    integer :: i,io                            ! Loop index.
 
     t = 0.0_dp         ! Initialize simulation time.
     end_time = 1000.0_dp ! Set simulation end time.
-    dt = 0.1_dp          ! Set time step size.
+    dt = 0.8_dp          ! Set time step size.
 
     ! Main simulation loop: continue as long as current time is less than end time.
     do while (t < end_time)
-      ! For debugging: print the position of the first particle at each time step.
-      print *, bodies(1)%position(1),bodies(1)%position(2),bodies(1)%position(3)
-
       ! === First Half-Step of Integration ===
 
       ! 1. Allocate and initialize the root node for tree building.
@@ -419,8 +433,6 @@ module octree_module
       root%size = maxval([(maxval(bodies%position(1)) - minval(bodies%position(1))), &
                           (maxval(bodies%position(2)) - minval(bodies%position(2))), &
                           (maxval(bodies%position(3)) - minval(bodies%position(3)))])
-      ! Fallback for root%size if all particles are at the same point, to avoid zero size.
-      if (root%size < 1.0e-9_dp) root%size = 1.0_dp
 
       root%n_particles = size(bodies) ! Set the number of particles in the root node.
       allocate(root%particles(size(bodies))) ! Allocate space for copies of all particles in the root.
@@ -436,13 +448,7 @@ module octree_module
       ! Assuming P = (gamma - 1) * rho * u, with (gamma - 1) = 2/3.
       do i = 1, root%n_particles
         bodies(i)%pressure = (0.66666666666666667_dp) * bodies(i)%internal_energy * bodies(i)%density
-        ! Ensure pressure is non-negative.
-        if (bodies(i)%pressure < 0.0_dp) bodies(i)%pressure = 0.0_dp
       end do
-
-      ! 5. Synchronize updated pressure values into the particle copies within the tree.
-      ! This is important so that `SPH_tree_search` uses the current pressure of neighbor particles.
-      root%particles%pressure = bodies%pressure
 
       ! 6. Calculate gravitational acceleration for all particles using Barnes-Hut.
       ! Initial acceleration is reset before accumulation.
@@ -481,7 +487,6 @@ module octree_module
       root%size = maxval([(maxval(bodies%position(1)) - minval(bodies%position(1))), &
                           (maxval(bodies%position(2)) - minval(bodies%position(2))), &
                           (maxval(bodies%position(3)) - minval(bodies%position(3)))])
-      if (root%size < 1.0e-9_dp) root%size = 1.0_dp
 
       root%n_particles = size(bodies)
       allocate(root%particles(size(bodies)))
@@ -498,9 +503,6 @@ module octree_module
         bodies(i)%pressure = (0.66666666666666667_dp) * bodies(i)%internal_energy * bodies(i)%density
         if (bodies(i)%pressure < 0.0_dp) bodies(i)%pressure = 0.0_dp
       end do
-
-      ! 14. Synchronize pressures back into tree copies.
-      root%particles%pressure = bodies%pressure
 
       ! 15. Recalculate gravitational acceleration.
       call navigate_tree(root, bodies, 0.5_dp)
@@ -519,6 +521,12 @@ module octree_module
       deallocate(root) 
       t = t + dt 
     end do
+
+    open(newunit=io, file="log.txt", status="new", action = "write")
+    do i = 1, size(bodies)
+      write(io, *)  "Position:", bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3), "Density:", bodies(i)%density
+    end do  
+    close(io)
   end subroutine simulate
 end module octree_module
 
