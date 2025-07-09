@@ -1,3 +1,6 @@
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!PAST THIS POINT THE STUFF WORKS FINE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 module octree_module
   implicit none
   ! This module encapsulates all data types, parameters, and subroutines
@@ -5,19 +8,20 @@ module octree_module
   ! coupled with a Barnes-Hut octree for gravitational interactions.
 
   ! Global Parameters:
-  real, parameter :: G = 6.67430e-11        ! Gravitational constant (in SI units)
-  real, parameter :: softening = 1.0e-5     ! Softening length to prevent singularities in gravitational force at very small distances
-  integer, parameter :: dp = kind(1.0d0)    ! Defines double precision kind for real variables, ensuring high accuracy
+  real, parameter :: G = 6.67430e-12 !should be -12        ! Gravitational constant (in SI units)
+  real, parameter :: softening = 100.0
+  integer, parameter :: dp = kind(1.0d0)    ! Defines double precision
   integer, parameter :: nq = 1000          ! Number of samples for the SPH kernel lookup tables.
                                            ! This determines the resolution of the pre-computed kernel values.
   real(dp), allocatable :: w_table(:), dw_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq   ! Step size for 'q' (normalized distance) in the kernel lookup tables.
                                            ! 'q' ranges from 0 to 2.
-  real(dp), parameter :: smoothing = 10.0_dp 
+  real(dp), parameter :: smoothing = 300.0_dp 
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
+    integer :: number
     real(dp) :: mass                  ! Mass of the particle
     real(dp) :: density               ! Density of the particle (rho)
     real(dp) :: internal_energy       ! Internal energy per unit mass (u)
@@ -30,13 +34,13 @@ module octree_module
 
   ! Represents a node (branch) in the Barnes-Hut octree.
   type :: branch
-    real(dp), dimension(3) :: center      ! Geometric center of the octree node's bounding box
-    real(dp) :: size                     ! Side length of the cubic bounding box for this node
-    integer :: n_particles              ! Number of particles contained directly within this node's 'particles' array.
+    real(dp), dimension(3) :: center      ! Geometric center of the octree node
+    real(dp) :: size                     ! Side length
+    integer :: n_particles              ! Number of particles
     type(Particle), allocatable :: particles(:) ! Array of particles stored in this node.
-    real(dp) :: mass_total               ! Total mass of all particles (or sub-nodes) within this node's bounds
-    real(dp), dimension(3) :: mass_center ! Center of mass of all particles (or sub-nodes) within this node's bounds
-    type(branch), allocatable :: children(:) ! Array of 8 child branches (sub-nodes) for hierarchical representation.
+    real(dp) :: mass_total               ! Total mass of all particles
+    real(dp), dimension(3) :: mass_center ! Center of mass
+    type(branch), allocatable :: children(:) ! Array of 8 child branches
 
   end type branch
 
@@ -106,7 +110,7 @@ module octree_module
 
     integer :: i, j, n                        ! Loop indices and temporary size variable
     real(dp), dimension(3) :: offset         ! Spatial offset for calculating child node centers
-    type(Particle), allocatable :: child_particles(:) ! Temporary array used for reallocating child particle arrays
+    type(Particle), allocatable :: child_particles(:)
     integer :: child_index                    ! Index (1-8) representing which child octant a particle belongs to
     integer :: p                              ! Particle loop index
 
@@ -122,8 +126,6 @@ module octree_module
     if (node%mass_total > 0.0_dp) then
       node%mass_center = node%mass_center / node%mass_total
     else
-      ! If the node has no mass (e.g., no particles or all particles have zero mass),
-      ! its center of mass is set to its geometric center.
       node%mass_center = node%center
     end if
 
@@ -218,10 +220,6 @@ module octree_module
   end do
   end subroutine navigate_tree
 
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!PAST THIS POINT THE STUFF WORKS FINE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
   ! Subroutine: get_SPH
   ! Orchestrates the calculation of SPH forces and internal energy rates for all particles.
   subroutine get_SPH(root, body)
@@ -245,9 +243,9 @@ module octree_module
     implicit none
     type(branch), intent(in) :: node          ! Current octree node being examined.
     type(particle), intent(inout) :: body     ! The single particle for which SPH interactions are calculated.
-    real(dp), dimension(3) :: over_dr, nr, dWj, vij ! over_dr: vector from body to node center; nr: normalized separation vector;
+    real(dp), dimension(3) :: over_dr, nr, dWj, vij, viscous_cont ! over_dr: vector from body to node center; nr: normalized separation vector;
                                                  ! dWj: gradient of kernel; vij: relative velocity vector.
-    real(dp) :: Wj, dr, mj, dWj_mag, vdotW   ! Wj: kernel value; dr: distance; mj: neighbor mass;
+    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu ! Wj: kernel value; dr: distance; mj: neighbor mass;
                                              ! dWj_mag: magnitude of kernel derivative; vdotW: (v_ij . grad(W_ij)).
     integer :: j                             ! Loop index for children
     logical :: has_children                   ! Flag indicating if the current node has children.
@@ -274,12 +272,17 @@ module octree_module
     ! is a candidate neighbor for 'body'.
     else if (node%n_particles == 1 .and. all(abs(over_dr) < (2.0_dp*smoothing + node%size/2.0_dp))) then
       ! This is where the interaction with a single neighbor particle (node%particles(1)) occurs.
+
+      if (node%particles(1)%number == body%number) return !check if the particle is 
+      
       nr = (body%position - node%particles(1)%position) ! Vector from neighbor to the 'body' particle
       dr = sqrt(sum(nr**2))                             ! Distance between the 'body' and its neighbor
 
-      if (dr == 0.0_dp) return
-
       vij = (body%velocity - node%particles(1)%velocity) ! Relative velocity between 'body' and neighbor
+      vdotr = sum(vij * nr)
+
+      if (vdotr >= 0) vdotr = 0.0_dp
+
       nr = nr / dr ! Normalize the separation vector
 
       ! Lookup kernel (W) and derivative (dW/dr) values for the calculated distance 'dr'.
@@ -289,11 +292,13 @@ module octree_module
       dWj = nr * dWj_mag / (3.14159265359_dp * smoothing**4)
       mj = node%particles(1)%mass ! Mass of the neighbor particle
 
+      !get viscous contributions
+      vis_nu = (smoothing * vdotr)/(dr*dr + 0.001*smoothing*smoothing)
+      viscous_cont = vis_nu*vis_nu / (body%density + node%particles(1)%density)
+
       ! Accumulate SPH pressure force:
-      ! F_i = - sum_j m_j (P_i/rho_i^2 + P_j/rho_j^2) grad(W_ij)
-      ! The acceleration is a_i = F_i / m_i (implicitly included by `body%acceleration = body%acceleration - ...`)
       body%acceleration = body%acceleration - mj * ((body%pressure/(body%density * body%density)) + &
-                                                  (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density))) * dWj
+                                                  (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density)) + viscous_cont) * dWj
 
       vdotW = sum(vij * dWj)
       ! Accumulate rate of change in internal energy:
@@ -381,14 +386,16 @@ module octree_module
     implicit none
     type(branch), intent(inout) :: node
     type(particle), intent(in)  :: bodies(:)
-    integer :: i
+    integer :: i, num
 
     ! For each particle in this node, find the corresponding particle in bodies by position and set density
     do i = 1, size(node%particles)
       ! Simple approach: assume the i-th particle in node%particles corresponds to i-th in bodies
       ! (if you always copy bodies into root%particles in order)
-      node%particles(i)%density = bodies(i)%density
-      node%particles(i)%pressure = (0.66666666666666667_dp) * bodies(i)%internal_energy * bodies(i)%density
+      num = node%particles(i)%number
+      
+      node%particles(i)%density = bodies(num)%density
+      node%particles(i)%pressure = (0.66666666666666667_dp) * bodies(num)%internal_energy * bodies(num)%density
 
       if (node%particles(i)%density == 0.0_dp) stop
     end do
@@ -416,11 +423,12 @@ module octree_module
     integer :: i,io                            ! Loop index.
 
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 1000.0_dp ! Set simulation end time.
-    dt = 0.8_dp          ! Set time step size.
+    end_time = 250.0_dp ! Set simulation end time.
+    dt = 0.5_dp          ! Set time step size.
 
     ! Main simulation loop: continue as long as current time is less than end time.
     do while (t < end_time)
+      print *, 'is running', t
       ! === First Half-Step of Integration ===
 
       ! 1. Allocate and initialize the root node for tree building.
@@ -455,7 +463,8 @@ module octree_module
       do i = 1, root%n_particles
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
-      call navigate_tree(root, bodies, 0.5_dp) ! `theta` criterion 0.5.
+
+      call navigate_tree(root, bodies, 0.5_dp) ! theta criterion 0.5.
 
       ! 7. Calculate SPH accelerations (pressure forces) and internal energy rates.
       ! Initial internal energy rate is reset within `get_SPH` before accumulation.
@@ -524,7 +533,7 @@ module octree_module
 
     open(newunit=io, file="log.txt", status="new", action = "write")
     do i = 1, size(bodies)
-      write(io, *)  "Position:", bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3), "Density:", bodies(i)%density
+      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3)
     end do  
     close(io)
   end subroutine simulate
@@ -541,7 +550,7 @@ program barnes_hut
   call init_kernel_table()
 
   ! Define the total number of particles for the simulation.
-  total_particles = 500
+  total_particles = 2000
   ! Allocate memory for the array of particles.
   allocate(bodies(total_particles))
 
@@ -549,16 +558,16 @@ program barnes_hut
   do n = 1, total_particles
     call random_number(bodies(n)%position) ! Generate random numbers (0 to 1) for initial positions.
     ! Scale and shift positions to be within a cube (e.g., from 0 to 12).
-    bodies(n)%position = 12.0_dp * bodies(n)%position
-
-    bodies(n)%mass = 100.0_dp           ! Assign a mass to each particle.
+    bodies(n)%position = 7500.0_dp * bodies(n)%position
+    bodies(n)%number = n
+    bodies(n)%mass = 5000.0_dp           ! Assign a mass to each particle.
     call random_number(bodies(n)%velocity) ! Generate random numbers for initial velocities.
     ! Scale velocities to be very small, effectively starting from rest or very slow movement.
     bodies(n)%velocity = 0.000_dp * bodies(n)%velocity
 
-    bodies(n)%pressure = 1.0_dp       ! Initial placeholder pressure. This will be updated by the EOS.
-    bodies(n)%internal_energy = 1.0_dp ! Initial internal energy.
-    bodies(n)%density = 0.0_dp         ! Initial density set to zero. This will be calculated in `get_density`.
+    bodies(n)%pressure = 1.0_dp       
+    bodies(n)%internal_energy = 1000.0_dp 
+    bodies(n)%density = 0.0_dp         
   end do
 
   ! Start the main simulation loop.
