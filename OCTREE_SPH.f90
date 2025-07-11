@@ -1,27 +1,20 @@
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!PAST THIS POINT THE STUFF WORKS FINE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 module octree_module
   implicit none
-  ! This module encapsulates all data types, parameters, and subroutines
-  ! required for the SPH (Smoothed Particle Hydrodynamics) simulation
-  ! coupled with a Barnes-Hut octree for gravitational interactions.
-
   ! Global Parameters:
   real, parameter :: G = 6.67430e-12 !should be -12        ! Gravitational constant (in SI units)
   real, parameter :: softening = 100.0
   integer, parameter :: dp = kind(1.0d0)    ! Defines double precision
-  integer, parameter :: nq = 1000          ! Number of samples for the SPH kernel lookup tables.
+  integer, parameter :: nq = 1000, max_depth = 10000          ! Number of samples for the SPH kernel lookup tables.
                                            ! This determines the resolution of the pre-computed kernel values.
   real(dp), allocatable :: w_table(:), dw_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq   ! Step size for 'q' (normalized distance) in the kernel lookup tables.
                                            ! 'q' ranges from 0 to 2.
-  real(dp), parameter :: smoothing = 300.0_dp 
+  real(dp), parameter :: smoothing = 100.0_dp 
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
-    integer :: number
+    integer :: number !this is just an identifier for when we sync the tree with the particles
     real(dp) :: mass                  ! Mass of the particle
     real(dp) :: density               ! Density of the particle (rho)
     real(dp) :: internal_energy       ! Internal energy per unit mass (u)
@@ -231,8 +224,6 @@ module octree_module
 
     ! Loop through each particle in the main `body` array.
     do i = 1, size(body)
-      ! For each particle, search the octree to find its SPH neighbors and
-      ! accumulate SPH terms (pressure forces, internal energy rates).
       call SPH_tree_search(root, body(i))
     end do
   end subroutine get_SPH
@@ -243,9 +234,9 @@ module octree_module
     implicit none
     type(branch), intent(in) :: node          ! Current octree node being examined.
     type(particle), intent(inout) :: body     ! The single particle for which SPH interactions are calculated.
-    real(dp), dimension(3) :: over_dr, nr, dWj, vij, viscous_cont ! over_dr: vector from body to node center; nr: normalized separation vector;
+    real(dp), dimension(3) :: over_dr, nr, dWj, vij ! over_dr: vector from body to node center; nr: normalized separation vector;
                                                  ! dWj: gradient of kernel; vij: relative velocity vector.
-    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu ! Wj: kernel value; dr: distance; mj: neighbor mass;
+    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu,viscous_cont ! Wj: kernel value; dr: distance; mj: neighbor mass;
                                              ! dWj_mag: magnitude of kernel derivative; vdotW: (v_ij . grad(W_ij)).
     integer :: j                             ! Loop index for children
     logical :: has_children                   ! Flag indicating if the current node has children.
@@ -293,16 +284,16 @@ module octree_module
       mj = node%particles(1)%mass ! Mass of the neighbor particle
 
       !get viscous contributions
-      vis_nu = (smoothing * vdotr)/(dr*dr + 0.001*smoothing*smoothing)
+      vis_nu = (smoothing * vdotr)/(dr*dr + 0.1*smoothing*smoothing)
       viscous_cont = vis_nu*vis_nu / (body%density + node%particles(1)%density)
 
       ! Accumulate SPH pressure force:
       body%acceleration = body%acceleration - mj * ((body%pressure/(body%density * body%density)) + &
                                                   (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density)) + viscous_cont) * dWj
 
-      vdotW = sum(vij * dWj)
+      vdotW = sum((1 + viscous_cont)*vij * dWj)
       ! Accumulate rate of change in internal energy:
-      body%internal_energy_rate = body%internal_energy_rate + (body%pressure/body%density)*mj*(vdotW)
+      body%internal_energy_rate = body%internal_energy_rate + ((body%pressure/body%density)*mj*(vdotW))
       return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
@@ -411,24 +402,22 @@ module octree_module
   end subroutine sync_density_to_tree
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-  ! Subroutine: simulate
-  ! The main simulation loop, which advances the state of all particles over time.
-  ! It employs a two-step integration scheme (similar to velocity Verlet) and
-  ! recalculates forces and properties at each step.
   subroutine simulate(bodies)
     implicit none
     type(particle), intent(inout) :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
-    real(dp) :: t, dt, end_time                ! Current simulation time, time step size, and simulation end time.
-    integer :: i,io                            ! Loop index.
+    real(dp) :: t, dt, dt_candidate, end_time
+    real(dp), allocatable :: vel_squared(:)
+    integer :: i, io, number_bodies                           ! Loop index.
 
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 250.0_dp ! Set simulation end time.
-    dt = 0.5_dp          ! Set time step size.
+    end_time = 1000.0_dp ! Set simulation end time.
+    dt = 1.0_dp          ! Set time step size.
+    number_bodies = size(bodies) !total number of pariticles
+    allocate(vel_squared(number_bodies))
 
     ! Main simulation loop: continue as long as current time is less than end time.
     do while (t < end_time)
-      print *, 'is running', t
       ! === First Half-Step of Integration ===
 
       ! 1. Allocate and initialize the root node for tree building.
@@ -442,12 +431,12 @@ module octree_module
                           (maxval(bodies%position(2)) - minval(bodies%position(2))), &
                           (maxval(bodies%position(3)) - minval(bodies%position(3)))])
 
-      root%n_particles = size(bodies) ! Set the number of particles in the root node.
-      allocate(root%particles(size(bodies))) ! Allocate space for copies of all particles in the root.
+      root%n_particles = number_bodies ! Set the number of particles in the root node.
+      allocate(root%particles(number_bodies)) ! Allocate space for copies of all particles in the root.
       root%particles = bodies ! Copy current particle states into the root node for tree construction.
 
       ! 2. Build the octree from the current particle positions.
-      call build_tree(root, 1000, 1) ! `depth` limit 1000, `max_particles` per leaf node 1.
+      call build_tree(root, max_depth, 1) ! `depth` limit 1000, `max_particles` per leaf node 1.
 
       ! 3. Calculate densities for all particles using the newly built tree.
       call get_density(root, bodies)
@@ -497,12 +486,12 @@ module octree_module
                           (maxval(bodies%position(2)) - minval(bodies%position(2))), &
                           (maxval(bodies%position(3)) - minval(bodies%position(3)))])
 
-      root%n_particles = size(bodies)
-      allocate(root%particles(size(bodies)))
+      root%n_particles = number_bodies
+      allocate(root%particles(number_bodies))
       root%particles = bodies
 
       ! 11. Rebuild the octree.
-      call build_tree(root, 1000, 1)
+      call build_tree(root, max_depth, 1)
 
       ! 12. Recalculate densities.
       call get_density(root, bodies)
@@ -529,13 +518,33 @@ module octree_module
 
       deallocate(root) 
       t = t + dt 
+
+      !find next timestep
+      do i = 1, number_bodies
+        vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
+      end do
+      dt_candidate = minval(vel_squared) * 0.5
+
+      if (dt_candidate > 2*dt .and. 1.5 * dt < 50) then
+        dt = 1.5 * dt
+      else if (dt_candidate < 0.5 * dt) then
+        dt = 0.5 * dt
+      end if
+      print *,"dt :", dt, "time : ", t
+
     end do
 
+    deallocate(vel_squared)
+
     open(newunit=io, file="log.txt", status="new", action = "write")
-    do i = 1, size(bodies)
-      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3)
+    write(io, *) 'x','y','z', 'vx','vy','vz','energy','density'
+    do i = 1, number_bodies
+      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density
     end do  
     close(io)
+    print *, maxval([(maxval(bodies%position(1)) - minval(bodies%position(1))), &
+                          (maxval(bodies%position(2)) - minval(bodies%position(2))), &
+                          (maxval(bodies%position(3)) - minval(bodies%position(3)))])
   end subroutine simulate
 end module octree_module
 
@@ -550,7 +559,7 @@ program barnes_hut
   call init_kernel_table()
 
   ! Define the total number of particles for the simulation.
-  total_particles = 2000
+  total_particles = 5000
   ! Allocate memory for the array of particles.
   allocate(bodies(total_particles))
 
@@ -558,15 +567,15 @@ program barnes_hut
   do n = 1, total_particles
     call random_number(bodies(n)%position) ! Generate random numbers (0 to 1) for initial positions.
     ! Scale and shift positions to be within a cube (e.g., from 0 to 12).
-    bodies(n)%position = 7500.0_dp * bodies(n)%position
+    bodies(n)%position = 5000.0_dp * bodies(n)%position
     bodies(n)%number = n
     bodies(n)%mass = 5000.0_dp           ! Assign a mass to each particle.
     call random_number(bodies(n)%velocity) ! Generate random numbers for initial velocities.
     ! Scale velocities to be very small, effectively starting from rest or very slow movement.
-    bodies(n)%velocity = 0.000_dp * bodies(n)%velocity
+    bodies(n)%velocity = 1.000_dp * bodies(n)%velocity
 
     bodies(n)%pressure = 1.0_dp       
-    bodies(n)%internal_energy = 1000.0_dp 
+    bodies(n)%internal_energy = 500.0_dp 
     bodies(n)%density = 0.0_dp         
   end do
 
