@@ -14,10 +14,11 @@ module octree_module
   ! Represents a single SPH particle with its physical properties.
   type :: particle
     integer :: number !this is just an identifier for when we sync the tree with the particles
-    real(dp) :: mass 
-    real(dp) :: density   
-    real(dp) :: internal_energy  
-    real(dp) :: pressure              
+    real(dp) :: mass
+    real(dp) :: density
+    real(dp) :: internal_energy
+    real(dp) :: pressure
+    real(dp) :: sound_speed
     real(dp) :: internal_energy_rate  
     real(dp), dimension(3) :: position 
     real(dp), dimension(3) :: velocity 
@@ -219,7 +220,7 @@ module octree_module
     type(branch), intent(in) :: node          ! Current octree node being examined.
     type(particle), intent(inout) :: body     ! The single particle for which SPH interactions are calculated.
     real(dp), dimension(3) :: over_dr, nr, dWj, vij ! over_dr: the 'overlap distance'
-    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu,viscous_cont
+    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu,viscous_cont, avg_sound_speed
     integer :: j
     logical :: has_children
 
@@ -266,15 +267,16 @@ module octree_module
 
       !get viscous contributions
       vis_nu = (smoothing * vdotr)/(dr*dr + 0.1*smoothing*smoothing)
-      viscous_cont = vis_nu*vis_nu / (body%density + node%particles(1)%density)
+      avg_sound_speed = - 0.25 * (body%sound_speed + node%particles(1)%sound_speed) !average sound speed multiplied by - 1/2
+      viscous_cont = (avg_sound_speed * vis_nu + vis_nu*vis_nu) / (body%density + node%particles(1)%density)
 
       ! Accumulate SPH pressure force:
       body%acceleration = body%acceleration - mj * ((body%pressure/(body%density * body%density)) + &
                                                   (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density)) + viscous_cont) * dWj
 
-      vdotW = sum((1 + viscous_cont)*vij * dWj)
+      vdotW = sum(vij * dWj)
       ! Accumulate rate of change in internal energy:
-      body%internal_energy_rate = body%internal_energy_rate + ((body%pressure/body%density)*mj*(vdotW))
+      body%internal_energy_rate = body%internal_energy_rate + ((body%pressure/body%density)*mj*(vdotW)) + (0.5 * viscous_cont * mj* vdotW)
       return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
@@ -351,7 +353,7 @@ module octree_module
   recursive subroutine sync_density_to_tree(node, bodies) !the tree needs to be synced up to the calculated densities in bodies
     implicit none
     type(branch), intent(inout) :: node
-    type(particle), intent(in)  :: bodies(:)
+    type(particle), intent(inout)  :: bodies(:)
     integer :: i, num
 
     ! For each particle in this node, find the corresponding particle in bodies by position and set density
@@ -359,9 +361,13 @@ module octree_module
       num = node%particles(i)%number
       
       node%particles(i)%density = bodies(num)%density
-      node%particles(i)%pressure = (0.66666666666666667_dp) * bodies(num)%internal_energy * bodies(num)%density
-
       if (node%particles(i)%density == 0.0_dp) stop
+      
+      node%particles(i)%pressure = (0.66666666666666667_dp) * bodies(num)%internal_energy * bodies(num)%density
+      bodies(num)%pressure = node%particles(i)%pressure
+
+      node%particles(i)%sound_speed = sqrt(1.66666666666666667_dp*bodies(num)%pressure/bodies(num)%density)
+      bodies(num)%sound_speed = node%particles(i)%sound_speed
     end do
 
     ! Recurse into children if present
@@ -384,7 +390,7 @@ module octree_module
     integer :: i, io, number_bodies                           ! Loop index.
 
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 200000.0_dp ! Set simulation end time.
+    end_time = 10000.0_dp ! Set simulation end time.
     dt = 1.0_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
     allocate(vel_squared(number_bodies))
@@ -413,12 +419,6 @@ module octree_module
 
       ! 3. Calculate densities for all particles using the newly built tree.
       call get_density(root, bodies)
-
-      ! 4. Calculate pressures for all particles using an Equation of State (EOS).
-      ! Assuming P = (gamma - 1) * rho * u, with (gamma - 1) = 2/3.
-      do i = 1, root%n_particles
-        bodies(i)%pressure = (0.66666666666666667_dp) * bodies(i)%internal_energy * bodies(i)%density
-      end do
 
       ! 5. Calculate gravitational acceleration for all particles using Barnes-Hut.
       ! Initial acceleration is reset before accumulation.
@@ -469,12 +469,6 @@ module octree_module
       ! 11. Recalculate densities.
       call get_density(root, bodies)
 
-      ! 12. Recalculate pressures.
-      do i = 1, root%n_particles
-        bodies(i)%pressure = (0.66666666666666667_dp) * bodies(i)%internal_energy * bodies(i)%density
-        if (bodies(i)%pressure < 0.0_dp) bodies(i)%pressure = 0.0_dp
-      end do
-
       ! 13. Recalculate gravitational acceleration.
       call navigate_tree(root, bodies, 0.5_dp)
 
@@ -509,10 +503,10 @@ module octree_module
 
     deallocate(vel_squared)
 
-    open(newunit=io, file="log-140725.txt", status="new", action = "write")
-    write(io, *) 'x','y','z', 'vx','vy','vz','energy','density'
+    open(newunit=io, file="log-150725.txt", status="new", action = "write")
+    write(io, *) 'x  ','y  ','z  ', 'vx  ','vy ','vz ','energy ','density  ', 'mass '
     do i = 1, number_bodies
-      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density
+      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density, bodies(i)%mass
     end do  
     close(io)
     print *, maxval([(maxval(bodies%position(1)) - minval(bodies%position(1))), &
@@ -527,6 +521,7 @@ program barnes_hut
 
   integer :: n, total_particles   ! Loop counter and total number of particles
   type(particle), allocatable :: bodies(:) ! Allocatable array to hold all particles in the simulation
+  logical :: exists
 
   ! Initialize the SPH kernel lookup tables (W and dW/dr). This needs to be done once at the start.
   call init_kernel_table()
@@ -552,6 +547,11 @@ program barnes_hut
     bodies(n)%density = 0.0_dp         
   end do
 
+  !----------------------------------
+  !------------take file------------- 
+  if (exists) then
+    
+  end if
   ! Start the main simulation loop.
   call simulate(bodies)
 
