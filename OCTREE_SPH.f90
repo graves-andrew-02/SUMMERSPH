@@ -6,7 +6,7 @@ module octree_module
   integer, parameter :: dp = kind(1.0d0)    ! Defines double precision
   integer, parameter :: nq = 1000, max_depth = 10000          ! Number of samples for the SPH kernel lookup tables.
                                            ! This determines the resolution of the pre-computed kernel values.
-  real(dp), allocatable :: w_table(:), dw_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
+  real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq 
   real(dp), parameter :: smoothing = 100.0_dp 
@@ -67,6 +67,28 @@ module octree_module
     end do
   end subroutine init_kernel_table
 
+  subroutine init_grav_kernel_table()
+    integer :: i
+    real(dp) :: q      ! Normalized distance (r/h), ranging from 0 to 2
+
+    ! Allocate memory for the kernel and derivative tables
+    allocate(grav_table(0:nq))
+
+    do i = 0, nq
+      q = i * dq ! Calculate current normalized distance
+      if (q >= 0.0_dp .and. q <= 1.0_dp) then
+        grav_table(i) = ((40.0_dp*q**3) - (36.0_dp * q**5) + (15.0_dp * q**6))/30.0_dp
+
+      else if (q > 1.0_dp .and. q <= 2.0_dp) then
+        grav_table(i) = ((80.0_dp * q**3) - (90.0_dp * q**4) + (36.0_dp * q**5) - (5*q**6) - 2)/30.0_dp
+
+      else
+        !Outside the compact support (r/h > 2), kernel and derivative are zero
+        grav_table(i) = 1.0_dp
+      end if
+    end do
+  end subroutine init_grav_kernel_table
+
   ! Retrieves interpolated SPH kernel values (W) and their derivatives (dW/dr)
   ! from the pre-computed tables for a given distance 'r' and smoothing length 'hi'.
   subroutine lookup_kernel(r, hi, Wi, dWi)
@@ -89,6 +111,25 @@ module octree_module
       dWi = 0.0_dp
     end if
   end subroutine lookup_kernel
+
+  subroutine lookup_grav_kernel(r, hi, Wi)
+    real(dp), intent(in) :: r, hi 
+    real(dp), intent(out) :: Wi
+    integer :: i
+    real(dp) :: alpha, qi
+
+    qi = r / hi
+    ! Check if the normalized distance is within the kernel's compact support [0, 2]
+    if (qi >= 0.0_dp .and. qi <= 2.0_dp) then
+      i = int(qi / dq) 
+      alpha = (qi - i * dq) / dq 
+      ! Perform linear interpolation to get the kernel and derivative values
+      Wi = (1.0_dp - alpha) * grav_table(i) + alpha * grav_table(i+1)
+    else
+      ! If outside the compact support, kernel values are 1
+      Wi = 1.0_dp
+    end if
+  end subroutine lookup_grav_kernel
 
   recursive subroutine build_tree(node, depth, max_particles)
     implicit none
@@ -171,7 +212,7 @@ module octree_module
   type(branch), intent(in) :: node
   type(particle), intent(inout) :: body(:)
   real(dp), intent(in) :: theta
-  real(dp) :: dist, d2 
+  real(dp) :: dist, d2, W
   real(dp), dimension(3) :: direction
   integer :: i, k
 
@@ -185,7 +226,8 @@ module octree_module
     if ((node%size / dist) < theta .or. .not. allocated(node%children)) then
       ! Calculate gravitational acceleration if the node has mass and distance is positive.
       if (node%mass_total > 0.0_dp .and. dist > 0.0_dp) then
-        body(i)%acceleration = body(i)%acceleration - (G * node%mass_total * direction / (dist**3))
+        call lookup_grav_kernel(dist, smoothing, W)
+        body(i)%acceleration = body(i)%acceleration - (G * node%mass_total * W *direction / (dist**3))
       end if
     else if (allocated(node%children)) then
       ! If the criterion is not met and the node has children, recurse into each child node.
@@ -525,6 +567,7 @@ program barnes_hut
 
   ! Initialize the SPH kernel lookup tables (W and dW/dr). This needs to be done once at the start.
   call init_kernel_table()
+  call init_grav_kernel_table()
 
   ! Define the total number of particles for the simulation.
   total_particles = 2000
