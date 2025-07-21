@@ -1,3 +1,4 @@
+
 module octree_module
   implicit none
   ! Global Parameters:
@@ -440,15 +441,11 @@ module octree_module
   subroutine check_bounds(bodies)
     implicit none
     type(particle), allocatable, intent(inout) :: bodies(:)
-    logical, allocatable :: keep_mask(:)
-    integer :: len_bod, i
-
-    len_bod = size(bodies)
-    if (len_bod == 0) return
-    allocate(keep_mask(len_bod))
+    logical :: keep_mask(size(bodies))
+    integer :: i
 
     ! Create logical mask: .TRUE. for bodies inside bounding box
-    keep_mask = [(all(abs(bodies(i)%position) <= bounding_size), i = 1, len_bod)]
+    keep_mask = [(all(abs(bodies(i)%position) <= bounding_size), i = 1, size(bodies))]
 
     ! Filter and assign
     bodies = pack(bodies, keep_mask)
@@ -456,7 +453,6 @@ module octree_module
     do i = 1, size(bodies)
         bodies(i)%number = i
     end do
-    deallocate(keep_mask)
   end subroutine check_bounds
 
   !subroutine check4sinkcreate(bodies)
@@ -472,7 +468,7 @@ module octree_module
     type(sink), intent(inout) :: sinks(:)
     type(particle), intent(inout), allocatable :: bodies(:)
     type(branch), intent(in) :: root
-    logical :: keep_mask(size(sinks), size(bodies))
+    logical :: keep_mask(size(sinks)+1, size(bodies))
     integer :: i, j
 
     !###########IDENTIFY ACCRETABLE PARTICLES##############
@@ -481,6 +477,8 @@ module octree_module
       call sink2gasdists(sinks(i), root, keep_mask(i,:))
     end do
     !###########PACK AND UPDATE SINK####################
+    ! Create logical mask: .TRUE. for bodies inside bounding box
+    keep_mask(size(sinks),:) = [(all(abs(bodies(i)%position) <= bounding_size), i = 1, size(bodies))] ! .true. if inside bounds, .false. if outside
 
     call pack_sinks(sinks,bodies, keep_mask)
   end subroutine initiate_sink_accretion
@@ -508,7 +506,6 @@ module octree_module
       dr = sum(sqrt(node%center*node%center - sink_i%position * sink_i%position))
       if (dr < sink_i%radius) then
         mask(node%particles%number) = .false.
-
       end if
       return
     end if
@@ -656,8 +653,7 @@ module octree_module
         dt = 0.5 * dt
       end if
 
-      ! Check for particle within the set bounds
-      !call check_bounds(bodies)
+      ! Sink accretion and boundary check
       call initiate_sink_accretion(sinks, bodies, root)
       deallocate(root) 
     end do
@@ -691,9 +687,9 @@ program barnes_hut
   do n = 1, total_particles
     call random_number(bodies(n)%position) ! Generate random numbers (0 to 1) for initial positions.
     ! Scale and shift positions to be within a cube (e.g., from 0 to 12).
-    bodies(n)%position = 10000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
+    bodies(n)%position = 100000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
     bodies(n)%number = n
-    bodies(n)%mass = 100000000.0_dp           ! Assign a mass to each particle.
+    bodies(n)%mass = 10000000.0_dp           ! Assign a mass to each particle.
     call random_number(bodies(n)%velocity) ! Generate random numbers for initial velocities.
     ! Scale velocities to be very small, effectively starting from rest or very slow movement.
     bodies(n)%velocity = 0.0_dp * (bodies(n)%velocity- [0.5,0.5,0.5])
@@ -706,7 +702,7 @@ program barnes_hut
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 5000_dp
+  sinks(1)%radius = 0_dp
 
   ! Start the main simulation loop.
   call simulate(bodies,sinks)
