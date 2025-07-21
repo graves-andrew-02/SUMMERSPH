@@ -459,8 +459,8 @@ module octree_module
   !  implicit none 
   !  type(particle), intent(inout) :: bodies(:)
   !  type(sink), allocatable :: sinks
-!
-!
+  !
+  !
   !end subroutine check4sinkcreate
 
   subroutine initiate_sink_accretion(sinks, bodies, root)
@@ -475,10 +475,18 @@ module octree_module
     do i = 1, size(sinks)
       keep_mask(i,:) = [((i == i), j = 1, size(bodies))] !sets all to .true. by default as to NOT accrete
       call sink2gasdists(sinks(i), root, keep_mask(i,:))
+
+      sinks(i)%mass = sinks(i)%mass + sum(pack(bodies%mass, keep_mask(i,:)))
+      sinks(i)%position = (sinks(i)%mass * sinks(i)%position + [ &
+        sum(pack(bodies%mass * bodies%position(1), keep_mask(i,:))), &
+        sum(pack(bodies%mass * bodies%position(2), keep_mask(i,:))), &
+        sum(pack(bodies%mass * bodies%position(3), keep_mask(i,:))) ]) / (sinks(i)%mass)
+
     end do
+
     !###########PACK AND UPDATE SINK####################
     ! Create logical mask: .TRUE. for bodies inside bounding box
-    keep_mask(size(sinks),:) = [(all(abs(bodies(i)%position) <= bounding_size), i = 1, size(bodies))] ! .true. if inside bounds, .false. if outside
+    !keep_mask(size(sinks)+1,:) = [(all(abs(bodies(j)%position) <= bounding_size), j = 1, size(bodies))] ! .true. if inside bounds, .false. if outside
 
     call pack_sinks(sinks,bodies, keep_mask)
   end subroutine initiate_sink_accretion
@@ -552,8 +560,8 @@ module octree_module
     do while (t < end_time)
       ! === First Half-Step of Integration ===
       number_bodies = size(bodies)
-      print *,"SPH Particles:", number_bodies , "dt :", dt, "time : ", t
-      
+      print *,"SPH Particles:", number_bodies, "dt :", dt, "time : ", t
+      print *, 'sink mass:', sinks(1)%mass, 'sink pos',sinks(1)%position
       ! 1. Allocate and initialize the root node for tree building.
       allocate(root)
       ! Initialize root node's bounding box based on the min/max positions of all particles.
@@ -575,7 +583,7 @@ module octree_module
       ! 3. Calculate densities for all particles using the newly built tree.
       call get_density(root, bodies)
 
-      ! 5. Calculate gravitational acceleration for all particles using Barnes-Hut.
+      ! 4. Calculate gravitational acceleration for all particles using Barnes-Hut.
       ! Initial acceleration is reset before accumulation.
       do i = 1, root%n_particles
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
@@ -583,16 +591,16 @@ module octree_module
 
       call navigate_tree(root, bodies, 0.5_dp) ! theta criterion 0.5.
 
-      ! 6. Calculate SPH accelerations (pressure forces) and internal energy rates.
+      ! 5. Calculate SPH accelerations (pressure forces) and internal energy rates.
       ! Initial internal energy rate is reset within `get_SPH` before accumulation.
       call get_SPH(root, bodies)
-      ! 7. Update velocities (first half-kick) and internal energies (half-step).
+      ! 6. Update velocities (first half-kick) and internal energies (half-step).
       do i = 1, root%n_particles
         bodies(i)%velocity = bodies(i)%velocity + (bodies(i)%acceleration)*dt/2.0_dp
         bodies(i)%internal_energy = bodies(i)%internal_energy + (bodies(i)%internal_energy_rate)*dt/2.0_dp
       end do
 
-      ! 8. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
+      ! 7. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
       do i = 1, root%n_particles
         bodies(i)%position = bodies(i)%position + (bodies(i)%velocity)*dt/2.0_dp
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
@@ -603,7 +611,7 @@ module octree_module
       ! === Second Half-Step of Integration ===
       ! Recalculate forces based on the new (half-drifted) positions for the second kick.
 
-      ! 9. Re-allocate and re-initialize the root node with the updated positions.
+      ! 8. Re-allocate and re-initialize the root node with the updated positions.
       allocate(root)
       root%center = [(maxval(bodies%position(1)) + minval(bodies%position(1)))/2.0_dp, &
                      (maxval(bodies%position(2)) + minval(bodies%position(2)))/2.0_dp, &
@@ -616,19 +624,19 @@ module octree_module
       allocate(root%particles(number_bodies))
       root%particles = bodies
 
-      ! 10. Rebuild the octree.
+      ! 9. Rebuild the octree.
       call build_tree(root, max_depth, 1)
 
-      ! 11. Recalculate densities.
+      ! 10. Recalculate densities.
       call get_density(root, bodies)
 
-      ! 13. Recalculate gravitational acceleration.
+      ! 11. Recalculate gravitational acceleration.
       call navigate_tree(root, bodies, 0.5_dp)
 
-      ! 14. Recalculate SPH accelerations and internal energy rates.
+      ! 12. Recalculate SPH accelerations and internal energy rates.
       call get_SPH(root, bodies)
 
-      ! 15. Final update of velocities (second half-kick) and internal energies (second half-step).
+      ! 13. Final update of velocities (second half-kick) and internal energies (second half-step).
       ! The positions are also updated here with the second half-drift to complete the full step.
       do i = 1, root%n_particles
         bodies(i)%velocity = bodies(i)%velocity + (bodies(i)%acceleration)*dt/2.0_dp
@@ -679,7 +687,7 @@ program barnes_hut
   call init_grav_kernel_table()
 
   ! Define the total number of particles for the simulation.
-  total_particles = 4000
+  total_particles = 5000
   ! Allocate memory for the array of particles.
   allocate(bodies(total_particles))
 
@@ -687,7 +695,7 @@ program barnes_hut
   do n = 1, total_particles
     call random_number(bodies(n)%position) ! Generate random numbers (0 to 1) for initial positions.
     ! Scale and shift positions to be within a cube (e.g., from 0 to 12).
-    bodies(n)%position = 100000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
+    bodies(n)%position = 10000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
     bodies(n)%number = n
     bodies(n)%mass = 10000000.0_dp           ! Assign a mass to each particle.
     call random_number(bodies(n)%velocity) ! Generate random numbers for initial velocities.
@@ -702,7 +710,8 @@ program barnes_hut
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 0_dp
+  sinks(1)%radius = 1000_dp
+  sinks(1)%mass = 1500000000000_dp
 
   ! Start the main simulation loop.
   call simulate(bodies,sinks)
