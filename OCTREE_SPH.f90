@@ -9,7 +9,7 @@ module octree_module
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 100.0_dp, bounding_size = 50000.0_dp
+  real(dp), parameter :: smoothing = 250.0_dp, bounding_size = 50000.0_dp
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
@@ -25,12 +25,23 @@ module octree_module
     real(dp), dimension(3) :: acceleration 
   end type particle
 
+  !sink particle type
+  type :: sink
+    real(dp) :: mass
+    real(dp) :: radius
+    real(dp), dimension(3) :: spin
+    real(dp), dimension(3) :: position 
+    real(dp), dimension(3) :: velocity 
+    real(dp), dimension(3) :: acceleration 
+  end type sink  
+
   ! Represents a node (branch) in the Barnes-Hut octree.
   type :: branch
-    real(dp), dimension(3) :: center      
-    real(dp) :: size                     
-    integer :: n_particles              
+    real(dp), dimension(3) :: center
+    real(dp) :: size
+    integer :: n_particles  
     type(Particle), allocatable :: particles(:) 
+    type(sink), allocatable :: sinks(:)
     real(dp) :: mass_total               
     real(dp), dimension(3) :: mass_center 
     type(branch), allocatable :: children(:) ! Array of 8 child branches
@@ -39,6 +50,7 @@ module octree_module
 
   contains
 
+!---------------------------Kernel Tables and Lookup routines-----------------------------
   ! Initializes the global lookup tables (w_table and dw_table) for the SPH kernel
   ! and its derivative.
   subroutine init_kernel_table()
@@ -131,6 +143,7 @@ module octree_module
     end if
   end subroutine lookup_grav_kernel
 
+!--------------------------Tree building and grav interaction------------------------------
   recursive subroutine build_tree(node, depth, max_particles)
     implicit none
     type(branch), intent(inout) :: node
@@ -240,7 +253,8 @@ module octree_module
   end do
   end subroutine navigate_tree
 
-  ! Subroutine: get_SPH
+!--------------------------SPH and Density finding subroutines---------------------------------
+
   ! Orchestrates the calculation of SPH forces and internal energy rates for all particles.
   subroutine get_SPH(root, body)
     implicit none
@@ -422,7 +436,8 @@ module octree_module
     end if
   end subroutine sync_density_to_tree
   
- subroutine check_bounds(bodies)
+!------------------Sink and particle deletion subroutines-----------------
+  subroutine check_bounds(bodies)
     implicit none
     type(particle), allocatable, intent(inout) :: bodies(:)
     logical, allocatable :: keep_mask(:)
@@ -444,22 +459,97 @@ module octree_module
     deallocate(keep_mask)
   end subroutine check_bounds
 
+  !subroutine check4sinkcreate(bodies)
+  !  implicit none 
+  !  type(particle), intent(inout) :: bodies(:)
+  !  type(sink), allocatable :: sinks
+!
+!
+  !end subroutine check4sinkcreate
 
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine initiate_sink_accretion(sinks, bodies, root)
+    implicit none
+    type(sink), intent(inout) :: sinks(:)
+    type(particle), intent(inout), allocatable :: bodies(:)
+    type(branch), intent(in) :: root
+    logical :: keep_mask(size(sinks), size(bodies))
+    integer :: i, j
 
-  subroutine simulate(bodies)
+    !###########IDENTIFY ACCRETABLE PARTICLES##############
+    do i = 1, size(sinks)
+      keep_mask(i,:) = [((i == i), j = 1, size(bodies))] !sets all to .true. by default as to NOT accrete
+      call sink2gasdists(sinks(i), root, keep_mask(i,:))
+    end do
+    !###########PACK AND UPDATE SINK####################
+
+    call pack_sinks(sinks,bodies, keep_mask)
+  end subroutine initiate_sink_accretion
+
+  recursive subroutine sink2gasdists(sink_i, node, mask)
+    implicit none
+    type(sink), intent(inout) :: sink_i
+    type(branch), intent(in) :: node
+    logical, intent(inout) :: mask(:)
+    real(dp) :: dr
+    real(dp), dimension(3) :: over_dr
+    integer :: j
+
+    over_dr = node%center - sink_i%position
+
+    !recurse if not deep enough
+    if (node%n_particles > 1 .and. all(abs(over_dr) < (2*sink_i%radius + node%size/2.0_dp)) .and. allocated(node%children)) then
+      do j = 1, size(node%children)
+        if (node%n_particles > 0) call sink2gasdists(sink_i, node%children(j), mask)
+      end do
+      return
+    
+    !base case of not needing to recurse
+    else if (node%n_particles == 1 .and. all(abs(over_dr) < (2*sink_i%radius + node%size/2.0_dp))) then
+      dr = sum(sqrt(node%center*node%center - sink_i%position * sink_i%position))
+      if (dr < sink_i%radius) then
+        mask(node%particles%number) = .false.
+
+      end if
+      return
+    end if
+    return
+  end subroutine sink2gasdists
+
+  subroutine pack_sinks(sinks, bodies, mask)
+    implicit none
+    type(sink), intent(inout) :: sinks(:)
+    type(particle), intent(inout), allocatable :: bodies(:)
+    logical, intent(in) :: mask(:,:)
+    logical :: d1mask(size(mask(1,:)))
+    integer :: i
+
+    do i = 1, size(sinks)
+      !all the sink updating info
+    end do
+
+    !pack bodies with vertically or'd mask
+    d1mask = any(mask, dim=1)
+    bodies = pack(bodies, d1mask)
+
+    do i = 1, size(bodies)
+      bodies%number = i
+    end do
+  end subroutine pack_sinks
+!-----------------------Simulation Loop Subroutine---------------------------
+
+  subroutine simulate(bodies, sinks)
     implicit none
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
+    type(sink), intent(inout) :: sinks(:)
     real(dp) :: t, dt, dt_candidate, end_time
     real(dp), allocatable :: vel_squared(:)
     integer :: i, io, number_bodies                           ! Loop index.
 
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 500000.0_dp ! Set simulation end time.
+    end_time = 1000.0_dp ! Set simulation end time.
     dt = 1.0_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
-    allocate(vel_squared(number_bodies))
 
     ! Main simulation loop: continue as long as current time is less than end time.
     do while (t < end_time)
@@ -495,6 +585,7 @@ module octree_module
       end do
 
       call navigate_tree(root, bodies, 0.5_dp) ! theta criterion 0.5.
+
       ! 6. Calculate SPH accelerations (pressure forces) and internal energy rates.
       ! Initial internal energy rate is reset within `get_SPH` before accumulation.
       call get_SPH(root, bodies)
@@ -548,14 +639,16 @@ module octree_module
         bodies(i)%position = bodies(i)%position + (bodies(i)%velocity)*dt/2.0_dp ! This completes the full position update (first half was above).
       end do
 
-      deallocate(root) 
       t = t + dt 
 
       !find next timestep candidate
+      allocate(vel_squared(number_bodies))
       do i = 1, number_bodies
         vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
       end do
       dt_candidate = minval(vel_squared) * 0.5
+
+      deallocate(vel_squared)
 
       if (dt_candidate > 2*dt .and. 1.5 * dt < 150) then
         dt = 1.5 * dt
@@ -564,12 +657,13 @@ module octree_module
       end if
 
       ! Check for particle within the set bounds
-      call check_bounds(bodies)
+      !call check_bounds(bodies)
+      call initiate_sink_accretion(sinks, bodies, root)
+      deallocate(root) 
     end do
 
-    deallocate(vel_squared)
 
-    open(newunit=io, file="log-180725-collapse.txt", status="new", action = "write")
+    open(newunit=io, file="log-210725.txt", status="new", action = "write")
     write(io, *) 'x  ','y  ','z  ', 'vx  ','vy ','vz ','energy ','density  ', 'mass '
     do i = 1, number_bodies
       write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density, bodies(i)%mass
@@ -580,17 +674,16 @@ end module octree_module
 
 program barnes_hut
   use octree_module  
-  implicit none      
-
+  implicit none
   integer :: n, total_particles   ! Loop counter and total number of particles
   type(particle), allocatable :: bodies(:) ! Allocatable array to hold all particles in the simulation
-
+  type(sink), allocatable :: sinks(:)
   ! Initialize the SPH kernel lookup tables (W and dW/dr). This needs to be done once at the start.
   call init_kernel_table()
   call init_grav_kernel_table()
 
   ! Define the total number of particles for the simulation.
-  total_particles = 3000
+  total_particles = 4000
   ! Allocate memory for the array of particles.
   allocate(bodies(total_particles))
 
@@ -598,19 +691,24 @@ program barnes_hut
   do n = 1, total_particles
     call random_number(bodies(n)%position) ! Generate random numbers (0 to 1) for initial positions.
     ! Scale and shift positions to be within a cube (e.g., from 0 to 12).
-    bodies(n)%position = 40000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
+    bodies(n)%position = 10000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
     bodies(n)%number = n
-    bodies(n)%mass = 10000.0_dp           ! Assign a mass to each particle.
+    bodies(n)%mass = 100000000.0_dp           ! Assign a mass to each particle.
     call random_number(bodies(n)%velocity) ! Generate random numbers for initial velocities.
     ! Scale velocities to be very small, effectively starting from rest or very slow movement.
-    bodies(n)%velocity = 0.1_dp * (bodies(n)%velocity- [0.5,0.5,0.5])
+    bodies(n)%velocity = 0.0_dp * (bodies(n)%velocity- [0.5,0.5,0.5])
 
     bodies(n)%pressure = 1.0_dp
-    bodies(n)%internal_energy = 50.0_dp 
+    bodies(n)%internal_energy = 0.01_dp 
     bodies(n)%density = 0.0_dp         
   end do
 
+  allocate(sinks(1))
+  sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
+  sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
+  sinks(1)%radius = 5000_dp
+
   ! Start the main simulation loop.
-  call simulate(bodies)
+  call simulate(bodies,sinks)
 
 end program barnes_hut
