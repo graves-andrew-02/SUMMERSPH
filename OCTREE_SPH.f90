@@ -1,3 +1,4 @@
+
 module octree_module
   implicit none
   ! Global Parameters:
@@ -467,7 +468,7 @@ module octree_module
     type(sink), intent(inout) :: sinks(:)
     type(particle), intent(inout), allocatable :: bodies(:)
     type(branch), intent(in) :: root
-    logical :: keep_mask(size(sinks), size(bodies))
+    logical :: keep_mask(size(sinks)+1, size(bodies))
     integer :: i, j
 
     !###########IDENTIFY ACCRETABLE PARTICLES##############
@@ -485,7 +486,7 @@ module octree_module
 
     !###########PACK AND UPDATE SINK####################
     ! Create logical mask: .TRUE. for bodies inside bounding box
-    !keep_mask(size(sinks)+1,:) = [(all(abs(bodies(j)%position) <= bounding_size), j = 1, size(bodies))] ! .true. if inside bounds, .false. if outside
+    keep_mask(size(sinks)+1,:) = [(all(abs(bodies(j)%position) <= bounding_size), j = 1, size(bodies))] ! .true. if inside bounds, .false. if outside
 
     call pack_sinks(bodies, keep_mask)
   end subroutine initiate_sink_accretion
@@ -527,8 +528,9 @@ module octree_module
     integer :: i
 
     !pack bodies with vertically or'd mask
-    d1mask = any(mask, dim=1)
+    d1mask = .not.any(.not.mask, dim=1)
     bodies = pack(bodies, d1mask)
+    !print *, d1mask
 
     do i = 1, size(bodies)
       bodies%number = i
@@ -576,7 +578,7 @@ module octree_module
       ! === First Half-Step of Integration ===
       number_bodies = size(bodies)
       print *,"SPH Particles:", number_bodies, "dt :", dt, "time : ", t
-      print *, 'sink mass:', sinks(1)%mass, 'sink pos',sinks(1)%position
+      !print *, 'sink mass:', sinks(1)%mass, 'sink pos',sinks(1)%position
       ! 1. Allocate and initialize the root node for tree building.
       allocate(root)
       ! Initialize root node's bounding box based on the min/max positions of all particles.
