@@ -1,4 +1,3 @@
-
 module octree_module
   implicit none
   ! Global Parameters:
@@ -221,7 +220,7 @@ module octree_module
   ! Recursive Subroutine: navigate_tree
   ! Traverses the octree to calculate the gravitational acceleration on a given 'body' particle
   ! using the Barnes-Hut approximation.
-  recursive subroutine navigate_tree(node, body, theta)
+  recursive subroutine particle_gravforces(node, body, theta)
   implicit none
   type(branch), intent(in) :: node
   type(particle), intent(inout) :: body(:)
@@ -247,12 +246,12 @@ module octree_module
       ! If the criterion is not met and the node has children, recurse into each child node.
       do k = 1, size(node%children)
         if (node%children(k)%n_particles > 0) then
-          call navigate_tree(node%children(k), body(i:i), theta) ! Recurse, passing the same particle
+          call particle_gravforces(node%children(k), body(i:i), theta) ! Recurse, passing the same particle
         end if
       end do
     end if
   end do
-  end subroutine navigate_tree
+  end subroutine particle_gravforces
 
 !--------------------------SPH and Density finding subroutines---------------------------------
 
@@ -468,7 +467,7 @@ module octree_module
     type(sink), intent(inout) :: sinks(:)
     type(particle), intent(inout), allocatable :: bodies(:)
     type(branch), intent(in) :: root
-    logical :: keep_mask(size(sinks)+1, size(bodies))
+    logical :: keep_mask(size(sinks), size(bodies))
     integer :: i, j
 
     !###########IDENTIFY ACCRETABLE PARTICLES##############
@@ -476,11 +475,11 @@ module octree_module
       keep_mask(i,:) = [((i == i), j = 1, size(bodies))] !sets all to .true. by default as to NOT accrete
       call sink2gasdists(sinks(i), root, keep_mask(i,:))
 
-      sinks(i)%mass = sinks(i)%mass + sum(pack(bodies%mass, keep_mask(i,:)))
+      sinks(i)%mass = sinks(i)%mass + sum(pack(bodies%mass, .not. keep_mask(i,:)))
       sinks(i)%position = (sinks(i)%mass * sinks(i)%position + [ &
-        sum(pack(bodies%mass * bodies%position(1), keep_mask(i,:))), &
-        sum(pack(bodies%mass * bodies%position(2), keep_mask(i,:))), &
-        sum(pack(bodies%mass * bodies%position(3), keep_mask(i,:))) ]) / (sinks(i)%mass)
+        sum(pack(bodies%mass * bodies%position(1), .not. (keep_mask(i,:)))), &
+        sum(pack(bodies%mass * bodies%position(2), .not. (keep_mask(i,:)))), &
+        sum(pack(bodies%mass * bodies%position(3), .not. (keep_mask(i,:)))) ]) / (sinks(i)%mass)
 
     end do
 
@@ -488,7 +487,7 @@ module octree_module
     ! Create logical mask: .TRUE. for bodies inside bounding box
     !keep_mask(size(sinks)+1,:) = [(all(abs(bodies(j)%position) <= bounding_size), j = 1, size(bodies))] ! .true. if inside bounds, .false. if outside
 
-    call pack_sinks(sinks,bodies, keep_mask)
+    call pack_sinks(bodies, keep_mask)
   end subroutine initiate_sink_accretion
 
   recursive subroutine sink2gasdists(sink_i, node, mask)
@@ -503,7 +502,7 @@ module octree_module
     over_dr = node%center - sink_i%position
 
     !recurse if not deep enough
-    if (node%n_particles > 1 .and. all(abs(over_dr) < (2*sink_i%radius + node%size/2.0_dp)) .and. allocated(node%children)) then
+    if (node%n_particles > 1 .and. all(abs(over_dr) < (sink_i%radius + node%size/2.0_dp)) .and. allocated(node%children)) then
       do j = 1, size(node%children)
         if (node%n_particles > 0) call sink2gasdists(sink_i, node%children(j), mask)
       end do
@@ -520,17 +519,12 @@ module octree_module
     return
   end subroutine sink2gasdists
 
-  subroutine pack_sinks(sinks, bodies, mask)
+  subroutine pack_sinks(bodies, mask)
     implicit none
-    type(sink), intent(inout) :: sinks(:)
     type(particle), intent(inout), allocatable :: bodies(:)
     logical, intent(in) :: mask(:,:)
     logical :: d1mask(size(mask(1,:)))
     integer :: i
-
-    do i = 1, size(sinks)
-      !all the sink updating info
-    end do
 
     !pack bodies with vertically or'd mask
     d1mask = any(mask, dim=1)
@@ -540,6 +534,27 @@ module octree_module
       bodies%number = i
     end do
   end subroutine pack_sinks
+
+  !direct sink forces calculation
+  subroutine sink_gravforces(bodies, sinks)
+    implicit none
+    type(particle), intent(inout) :: bodies(:)
+    type(sink), intent(inout) :: sinks(:)
+    real(dp) :: dr
+    real(dp), dimension(3) :: vect_dr, dist_weighting
+    integer :: i, j
+
+    do i = 1, size(sinks)
+      do j = 1, size(bodies)
+        vect_dr = bodies(j)%position - sinks(i)%position
+        dr = sqrt(sum((vect_dr)**2))
+
+        dist_weighting = G * vect_dr / (dr*dr*dr)
+        sinks(i)%acceleration = sinks(i)%acceleration + (bodies(j)%mass * dist_weighting)
+        bodies(j)%acceleration = bodies(j)%acceleration - (sinks(i)%mass * dist_weighting)
+      end do
+    end do
+  end subroutine sink_gravforces
 !-----------------------Simulation Loop Subroutine---------------------------
 
   subroutine simulate(bodies, sinks)
@@ -552,7 +567,7 @@ module octree_module
     integer :: i, io, number_bodies                           ! Loop index.
 
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 1000.0_dp ! Set simulation end time.
+    end_time = 500000.0_dp ! Set simulation end time.
     dt = 1.0_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
 
@@ -589,7 +604,8 @@ module octree_module
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
 
-      call navigate_tree(root, bodies, 0.5_dp) ! theta criterion 0.5.
+      call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
+      call sink_gravforces(bodies, sinks)
 
       ! 5. Calculate SPH accelerations (pressure forces) and internal energy rates.
       ! Initial internal energy rate is reset within `get_SPH` before accumulation.
@@ -607,10 +623,14 @@ module octree_module
         bodies(i)%internal_energy_rate = 0.0_dp
       end do
 
+      do i = 1, size(sinks)
+        sinks(i)%velocity = sinks(i)%velocity + (sinks(i)%acceleration)*dt/2.0_dp
+        sinks(i)%position = sinks(i)%position + (sinks(i)%velocity)*dt/2.0_dp ! This completes the full position update (first half was above).
+      end do
+      
       deallocate(root) ! Deallocate the current tree before rebuilding for the second half.
       ! === Second Half-Step of Integration ===
       ! Recalculate forces based on the new (half-drifted) positions for the second kick.
-
       ! 8. Re-allocate and re-initialize the root node with the updated positions.
       allocate(root)
       root%center = [(maxval(bodies%position(1)) + minval(bodies%position(1)))/2.0_dp, &
@@ -631,7 +651,8 @@ module octree_module
       call get_density(root, bodies)
 
       ! 11. Recalculate gravitational acceleration.
-      call navigate_tree(root, bodies, 0.5_dp)
+      call particle_gravforces(root, bodies, 0.5_dp)
+      call sink_gravforces(bodies, sinks)
 
       ! 12. Recalculate SPH accelerations and internal energy rates.
       call get_SPH(root, bodies)
@@ -642,6 +663,10 @@ module octree_module
         bodies(i)%velocity = bodies(i)%velocity + (bodies(i)%acceleration)*dt/2.0_dp
         bodies(i)%internal_energy = bodies(i)%internal_energy + (bodies(i)%internal_energy_rate)*dt/2.0_dp
         bodies(i)%position = bodies(i)%position + (bodies(i)%velocity)*dt/2.0_dp ! This completes the full position update (first half was above).
+      end do
+      do i = 1, size(sinks)
+        sinks(i)%velocity = sinks(i)%velocity + (sinks(i)%acceleration)*dt/2.0_dp
+        sinks(i)%position = sinks(i)%position + (sinks(i)%velocity)*dt/2.0_dp ! This completes the full position update (first half was above).
       end do
 
       t = t + dt 
@@ -667,8 +692,8 @@ module octree_module
     end do
 
 
-    open(newunit=io, file="log-210725.txt", status="new", action = "write")
-    write(io, *) 'x  ','y  ','z  ', 'vx  ','vy ','vz ','energy ','density  ', 'mass '
+    open(newunit=io, file="log-250725-3.txt", status="new", action = "write")
+    write(io, *) 'x  ','y  ','z  ','vx  ','vy ','vz ','energy ','density  ','mass  '
     do i = 1, number_bodies
       write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density, bodies(i)%mass
     end do  
@@ -697,10 +722,10 @@ program barnes_hut
     ! Scale and shift positions to be within a cube (e.g., from 0 to 12).
     bodies(n)%position = 10000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
     bodies(n)%number = n
-    bodies(n)%mass = 10000000.0_dp           ! Assign a mass to each particle.
+    bodies(n)%mass = 100000.0_dp           ! Assign a mass to each particle.
     call random_number(bodies(n)%velocity) ! Generate random numbers for initial velocities.
     ! Scale velocities to be very small, effectively starting from rest or very slow movement.
-    bodies(n)%velocity = 0.0_dp * (bodies(n)%velocity- [0.5,0.5,0.5])
+    bodies(n)%velocity = 0.01_dp * (bodies(n)%velocity - [0.5,0.5,0.5])
 
     bodies(n)%pressure = 1.0_dp
     bodies(n)%internal_energy = 0.01_dp 
@@ -710,8 +735,8 @@ program barnes_hut
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 1000_dp
-  sinks(1)%mass = 1500000000000_dp
+  sinks(1)%radius = 2000_dp
+  sinks(1)%mass = 15000000000_dp
 
   ! Start the main simulation loop.
   call simulate(bodies,sinks)
