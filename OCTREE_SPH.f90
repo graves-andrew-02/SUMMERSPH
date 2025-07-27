@@ -1,4 +1,3 @@
-
 module octree_module
   implicit none
   ! Global Parameters:
@@ -481,6 +480,8 @@ module octree_module
         sum(pack(bodies%mass * bodies%position(1), .not. (keep_mask(i,:)))), &
         sum(pack(bodies%mass * bodies%position(2), .not. (keep_mask(i,:)))), &
         sum(pack(bodies%mass * bodies%position(3), .not. (keep_mask(i,:)))) ]) / (sinks(i)%mass)
+      
+      !also need somthing to track the angular momentum
 
     end do
 
@@ -557,6 +558,87 @@ module octree_module
       end do
     end do
   end subroutine sink_gravforces
+
+  subroutine read_data_from_file(filename, bodies)
+    implicit none
+
+    ! Declare input argument
+    character(len=*), intent(in) :: filename
+
+    ! Define maximum number of lines and parameters
+    integer, parameter :: max_lines = 5000 ! Adjust this based on your file size
+    integer :: status, num_lines, i
+    character(len=256) :: header_line
+    real(kind=8), allocatable, dimension(:) :: x, y, z, vx, vy, vz, energy, mass
+    type(particle), allocatable, intent(inout) :: bodies(:)
+
+    ! Allocate arrays
+    ALLOCATE(x(MAX_LINES), y(MAX_LINES), z(MAX_LINES), &
+             vx(MAX_LINES), vy(MAX_LINES), vz(MAX_LINES), &
+             energy(MAX_LINES), mass(MAX_LINES), STAT=status)
+    IF (status /= 0) THEN
+        WRITE(*,*) 'Error allocating memory for arrays.'
+        RETURN ! Exit the subroutine if allocation fails
+    END IF
+
+    ! Open the file
+    OPEN(UNIT=10, FILE=filename, STATUS='OLD', ACTION='READ', IOSTAT=status)
+
+    IF (status /= 0) THEN
+        WRITE(*,*) 'Error opening file: ', TRIM(filename)
+        WRITE(*,*) 'Check if the file exists and has correct permissions.'
+        DEALLOCATE(x, y, z, vx, vy, vz, energy, mass) ! Deallocate on error
+        RETURN ! Exit the subroutine on file open error
+    END IF
+
+    ! Read the header line (and discard it)
+    READ(10, '(A)') header_line
+
+    ! Loop to read data
+    num_lines = 0
+    DO
+        READ(10, *, IOSTAT=status) x(num_lines+1), y(num_lines+1), z(num_lines+1), &
+                                   vx(num_lines+1), vy(num_lines+1), vz(num_lines+1), &
+                                   energy(num_lines+1), mass(num_lines+1)
+
+        IF (status /= 0) EXIT ! Exit loop on end-of-file or error
+
+        num_lines = num_lines + 1
+
+        IF (num_lines > MAX_LINES) THEN
+            WRITE(*,*) 'Warning: Maximum number of lines (', MAX_LINES, ') reached for file ', TRIM(filename), '.'
+            WRITE(*,*) 'Some data might not be read. Consider increasing MAX_LINES.'
+            EXIT
+        END IF
+    END DO
+
+    ! Close the file
+    CLOSE(UNIT=10)
+
+    ! Print a confirmation message and some data (optional)
+    write(*,*) 'Successfully read ', num_lines, ' lines of data from ', TRIM(filename), '.'
+    if (num_lines > 0) then
+    else
+        write(*,*) 'No data points were read from ', TRIM(filename), '.'
+    end if
+
+    allocate(bodies(size(x)))
+
+    bodies%position(1) = x
+    bodies%position(2) = y
+    bodies%position(3) = z
+    bodies%velocity(1) = vx
+    bodies%velocity(2) = vy
+    bodies%velocity(3) = vz
+    bodies%internal_energy = energy
+    bodies%mass = mass
+    DEALLOCATE(x, y, z, vx, vy, vz, energy, mass)
+
+    do i =1, size(bodies)
+      bodies(i)%number = i
+    end do 
+
+  END SUBROUTINE read_data_from_file
 !-----------------------Simulation Loop Subroutine---------------------------
 
   subroutine simulate(bodies, sinks)
@@ -569,7 +651,7 @@ module octree_module
     integer :: i, io, number_bodies                           ! Loop index.
 
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 500000.0_dp ! Set simulation end time.
+    end_time = 50000.0_dp ! Set simulation end time.
     dt = 1.0_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
 
@@ -627,9 +709,8 @@ module octree_module
 
       do i = 1, size(sinks)
         sinks(i)%velocity = sinks(i)%velocity + (sinks(i)%acceleration)*dt/2.0_dp
-        sinks(i)%position = sinks(i)%position + (sinks(i)%velocity)*dt/2.0_dp ! This completes the full position update (first half was above).
+        sinks(i)%position = sinks(i)%position + (sinks(i)%velocity)*dt/2.0_dp
       end do
-      
       deallocate(root) ! Deallocate the current tree before rebuilding for the second half.
       ! === Second Half-Step of Integration ===
       ! Recalculate forces based on the new (half-drifted) positions for the second kick.
@@ -678,7 +759,7 @@ module octree_module
       do i = 1, number_bodies
         vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
       end do
-      dt_candidate = minval(vel_squared) * 0.5
+      dt_candidate = minval(vel_squared) * 0.05
 
       deallocate(vel_squared)
 
@@ -694,7 +775,7 @@ module octree_module
     end do
 
 
-    open(newunit=io, file="log-250725-3.txt", status="new", action = "write")
+    open(newunit=io, file="log-260725-5.txt", status="new", action = "write")
     write(io, *) 'x  ','y  ','z  ','vx  ','vy ','vz ','energy ','density  ','mass  '
     do i = 1, number_bodies
       write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density, bodies(i)%mass
@@ -706,38 +787,21 @@ end module octree_module
 program barnes_hut
   use octree_module  
   implicit none
-  integer :: n, total_particles   ! Loop counter and total number of particles
+  character(len=256) :: filename
   type(particle), allocatable :: bodies(:) ! Allocatable array to hold all particles in the simulation
   type(sink), allocatable :: sinks(:)
   ! Initialize the SPH kernel lookup tables (W and dW/dr). This needs to be done once at the start.
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  ! Define the total number of particles for the simulation.
-  total_particles = 5000
-  ! Allocate memory for the array of particles.
-  allocate(bodies(total_particles))
+  filename = 'log.txt'
 
-  ! Initialize the properties of each particle.
-  do n = 1, total_particles
-    call random_number(bodies(n)%position) ! Generate random numbers (0 to 1) for initial positions.
-    ! Scale and shift positions to be within a cube (e.g., from 0 to 12).
-    bodies(n)%position = 10000.0_dp * (bodies(n)%position - [0.5,0.5,0.5])
-    bodies(n)%number = n
-    bodies(n)%mass = 100000.0_dp           ! Assign a mass to each particle.
-    call random_number(bodies(n)%velocity) ! Generate random numbers for initial velocities.
-    ! Scale velocities to be very small, effectively starting from rest or very slow movement.
-    bodies(n)%velocity = 0.01_dp * (bodies(n)%velocity - [0.5,0.5,0.5])
-
-    bodies(n)%pressure = 1.0_dp
-    bodies(n)%internal_energy = 0.01_dp 
-    bodies(n)%density = 0.0_dp         
-  end do
+  call read_data_from_file(filename,bodies)
 
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 2000_dp
+  sinks(1)%radius = 1000_dp
   sinks(1)%mass = 15000000000_dp
 
   ! Start the main simulation loop.
