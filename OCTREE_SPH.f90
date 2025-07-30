@@ -1,15 +1,14 @@
 module octree_module
   implicit none
   ! Global Parameters:
-  real, parameter :: G = 6.67430e-12 !should be -12        ! Gravitational constant (in SI units)
-  real, parameter :: softening = 300.0
-  integer, parameter :: dp = kind(1.0d0)    ! Defines double precision
+  integer, parameter :: dp = kind(1.0d0)
+  real(dp), parameter :: G = 39.47841760435743 !AU^3/(Msun*yr^2) Gravitational constant (in SI units)
   integer, parameter :: nq = 1000, max_depth = 10000          ! Number of samples for the SPH kernel lookup tables.
                                            ! This determines the resolution of the pre-computed kernel values.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 250.0_dp, bounding_size = 50000.0_dp
+  real(dp), parameter :: smoothing = 9.5e-5_dp, bounding_size = 100000.0_dp
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
@@ -232,7 +231,7 @@ module octree_module
   ! Loop over the (single) particle provided in the 'body' array slice.
   do i = 1, size(body)
     direction = body(i)%position - node%mass_center ! Vector pointing from particle to the node's center of mass
-    d2 = sum(direction**2) + softening**2 
+    d2 = sum(direction**2) + smoothing**2 
     dist = sqrt(d2)  
 
     ! Barnes-Hut criterion:
@@ -550,23 +549,25 @@ module octree_module
     do i = 1, size(sinks)
       do j = 1, size(bodies)
         vect_dr = bodies(j)%position - sinks(i)%position
-        dr = sqrt(sum((vect_dr)**2))
+        dr = sqrt(sum((vect_dr**2)))
 
         dist_weighting = G * vect_dr / (dr*dr*dr)
-        sinks(i)%acceleration = sinks(i)%acceleration + (bodies(j)%mass * dist_weighting)
+        !print *, 'weit', vect_dr
+        sinks(i)%acceleration = [0.0, 0.0,0.0 ]!sinks(i)%acceleration + (bodies(j)%mass * dist_weighting)
         bodies(j)%acceleration = bodies(j)%acceleration - (sinks(i)%mass * dist_weighting)
       end do
     end do
   end subroutine sink_gravforces
 
-  subroutine read_data_from_file(filename, bodies)
+!------------------File Reading and writing---------------------------------
+  subroutine read_data_from_file(filename, bodies, max_lines)
     implicit none
 
     ! Declare input argument
     character(len=*), intent(in) :: filename
 
     ! Define maximum number of lines and parameters
-    integer, parameter :: max_lines = 5000 ! Adjust this based on your file size
+    integer :: max_lines! Adjust this based on your file size
     integer :: status, num_lines, i
     character(len=256) :: header_line
     real(kind=8), allocatable, dimension(:) :: x, y, z, vx, vy, vz, energy, mass
@@ -639,6 +640,54 @@ module octree_module
     end do 
 
   END SUBROUTINE read_data_from_file
+
+  subroutine make_save(bodies, number)
+    implicit none
+    integer :: io, i, number
+    type(particle) :: bodies(:)
+    character(len = 256) :: savename
+
+    write(savename, '(A,I0,A)') 'save', number, '.txt'
+
+    open(newunit=io, file=savename, status="new", action = "write")
+    write(io, *) 'x  ','y  ','z  ','vx  ','vy ','vz ','energy ','density  ','mass  '
+    do i = 1, size(bodies)
+      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density, bodies(i)%mass
+    end do  
+    close(io)
+
+  end subroutine
+
+!----------------------- kick drift kick------------------------
+  !velocity update
+  subroutine kick(bodies, sinks, dt)
+    implicit none
+    type(particle), intent(inout) :: bodies(:)
+    type(sink), intent(inout) :: sinks(:)
+    real(dp), intent(in) :: dt
+
+    !v(i+0.5)
+    bodies%velocity(1) = bodies%velocity(1) + 0.5_dp*bodies%acceleration(1)*dt
+    bodies%velocity(2) = bodies%velocity(2) + 0.5_dp*bodies%acceleration(2)*dt
+    bodies%velocity(3) = bodies%velocity(3) + 0.5_dp*bodies%acceleration(3)*dt
+
+    bodies%internal_energy = bodies%internal_energy + 0.5_dp*bodies%internal_energy_rate*dt
+  end subroutine
+
+  !position update
+  subroutine drift(bodies, sinks, dt)
+    implicit none
+    type(particle), intent(inout) :: bodies(:)
+    type(sink), intent(inout) :: sinks(:)
+    real(dp), intent(in) :: dt
+
+    !x(i+1)
+    bodies%position(1) = bodies%position(1) + 0.5_dp*bodies%velocity(1)*dt
+    bodies%position(2) = bodies%position(2) + 0.5_dp*bodies%velocity(2)*dt
+    bodies%position(3) = bodies%position(3) + 0.5_dp*bodies%velocity(3)*dt
+
+    bodies%internal_energy = bodies%internal_energy + 0.5_dp*bodies%internal_energy_rate*dt
+  end subroutine
 !-----------------------Simulation Loop Subroutine---------------------------
 
   subroutine simulate(bodies, sinks)
@@ -648,11 +697,11 @@ module octree_module
     type(sink), intent(inout) :: sinks(:)
     real(dp) :: t, dt, dt_candidate, end_time
     real(dp), allocatable :: vel_squared(:)
-    integer :: i, io, number_bodies                           ! Loop index.
-
+    integer :: i, number_bodies , t_test                  ! Loop index.
+    t_test = 0
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 50000.0_dp ! Set simulation end time.
-    dt = 1.0_dp          ! Set time step size.
+    end_time = 0.002_dp ! Set simulation end time.
+    dt = 0.0000001_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
 
     ! Main simulation loop: continue as long as current time is less than end time.
@@ -688,29 +737,20 @@ module octree_module
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
 
-      call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
+      !call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
       call sink_gravforces(bodies, sinks)
+
+      !print *, 'maxacc', sqrt(sum(bodies(1)%acceleration**2))
 
       ! 5. Calculate SPH accelerations (pressure forces) and internal energy rates.
       ! Initial internal energy rate is reset within `get_SPH` before accumulation.
       call get_SPH(root, bodies)
       ! 6. Update velocities (first half-kick) and internal energies (half-step).
-      do i = 1, root%n_particles
-        bodies(i)%velocity = bodies(i)%velocity + (bodies(i)%acceleration)*dt/2.0_dp
-        bodies(i)%internal_energy = bodies(i)%internal_energy + (bodies(i)%internal_energy_rate)*dt/2.0_dp
-      end do
+      call kick(bodies, sinks, dt)
 
       ! 7. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
-      do i = 1, root%n_particles
-        bodies(i)%position = bodies(i)%position + (bodies(i)%velocity)*dt/2.0_dp
-        bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
-        bodies(i)%internal_energy_rate = 0.0_dp
-      end do
+      call drift(bodies, sinks, dt)
 
-      do i = 1, size(sinks)
-        sinks(i)%velocity = sinks(i)%velocity + (sinks(i)%acceleration)*dt/2.0_dp
-        sinks(i)%position = sinks(i)%position + (sinks(i)%velocity)*dt/2.0_dp
-      end do
       deallocate(root) ! Deallocate the current tree before rebuilding for the second half.
       ! === Second Half-Step of Integration ===
       ! Recalculate forces based on the new (half-drifted) positions for the second kick.
@@ -730,27 +770,24 @@ module octree_module
       ! 9. Rebuild the octree.
       call build_tree(root, max_depth, 1)
 
+      do i = 1, root%n_particles
+        bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
+      end do
+
       ! 10. Recalculate densities.
       call get_density(root, bodies)
 
       ! 11. Recalculate gravitational acceleration.
-      call particle_gravforces(root, bodies, 0.5_dp)
+      !call particle_gravforces(root, bodies, 0.5_dp)
       call sink_gravforces(bodies, sinks)
+      !print *, 'maxacc', sqrt(sum(bodies(1)%acceleration**2))
 
       ! 12. Recalculate SPH accelerations and internal energy rates.
       call get_SPH(root, bodies)
 
       ! 13. Final update of velocities (second half-kick) and internal energies (second half-step).
       ! The positions are also updated here with the second half-drift to complete the full step.
-      do i = 1, root%n_particles
-        bodies(i)%velocity = bodies(i)%velocity + (bodies(i)%acceleration)*dt/2.0_dp
-        bodies(i)%internal_energy = bodies(i)%internal_energy + (bodies(i)%internal_energy_rate)*dt/2.0_dp
-        bodies(i)%position = bodies(i)%position + (bodies(i)%velocity)*dt/2.0_dp ! This completes the full position update (first half was above).
-      end do
-      do i = 1, size(sinks)
-        sinks(i)%velocity = sinks(i)%velocity + (sinks(i)%acceleration)*dt/2.0_dp
-        sinks(i)%position = sinks(i)%position + (sinks(i)%velocity)*dt/2.0_dp ! This completes the full position update (first half was above).
-      end do
+      call kick(bodies, sinks, dt)
 
       t = t + dt 
 
@@ -759,33 +796,36 @@ module octree_module
       do i = 1, number_bodies
         vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
       end do
-      dt_candidate = minval(vel_squared) * 0.05
+      dt_candidate = minval(vel_squared) * 0.01
 
       deallocate(vel_squared)
 
-      if (dt_candidate > 2*dt .and. 1.5 * dt < 150) then
+      if (dt_candidate > 2*dt .and. 1.5 * dt < 1) then
         dt = 1.5 * dt
-      else if (dt_candidate < 0.5 * dt) then
+      else if (dt_candidate < 0.5 * dt .and. dt * 0.5 >0.0000001) then
         dt = 0.5 * dt
       end if
 
       ! Sink accretion and boundary check
       call initiate_sink_accretion(sinks, bodies, root)
       deallocate(root) 
+
+      if (t > 0.3333_dp*end_time.and. t_test==0) then 
+        call make_save(bodies, 2)
+        t_test = 1
+      end if
+      if (t > 0.6667_dp*end_time.and. t_test==1) then 
+        call make_save(bodies, 3)
+        t_test = 2
+      end if
     end do
 
-
-    open(newunit=io, file="log-260725-5.txt", status="new", action = "write")
-    write(io, *) 'x  ','y  ','z  ','vx  ','vy ','vz ','energy ','density  ','mass  '
-    do i = 1, number_bodies
-      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density, bodies(i)%mass
-    end do  
-    close(io)
+    call make_save(bodies, 4)
   end subroutine simulate
 end module octree_module
 
 program barnes_hut
-  use octree_module  
+  use octree_module
   implicit none
   character(len=256) :: filename
   type(particle), allocatable :: bodies(:) ! Allocatable array to hold all particles in the simulation
@@ -794,15 +834,15 @@ program barnes_hut
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  filename = 'log.txt'
+  filename = 'keplerian_ring_big.txt'
 
-  call read_data_from_file(filename,bodies)
+  call read_data_from_file(filename,bodies,5000)
 
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 1000_dp
-  sinks(1)%mass = 15000000000_dp
+  sinks(1)%radius = 0.0000000000001_dp
+  sinks(1)%mass = 1.0_dp
 
   ! Start the main simulation loop.
   call simulate(bodies,sinks)
