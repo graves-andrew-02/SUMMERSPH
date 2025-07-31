@@ -682,26 +682,26 @@ module octree_module
     real(dp), intent(in) :: dt
 
     !x(i+1)
-    bodies%position(1) = bodies%position(1) + 0.5_dp*bodies%velocity(1)*dt
-    bodies%position(2) = bodies%position(2) + 0.5_dp*bodies%velocity(2)*dt
-    bodies%position(3) = bodies%position(3) + 0.5_dp*bodies%velocity(3)*dt
+    bodies%position(1) = bodies%position(1) + bodies%velocity(1)*dt
+    bodies%position(2) = bodies%position(2) + bodies%velocity(2)*dt
+    bodies%position(3) = bodies%position(3) + bodies%velocity(3)*dt
 
-    bodies%internal_energy = bodies%internal_energy + 0.5_dp*bodies%internal_energy_rate*dt
+    bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
   end subroutine
 !-----------------------Simulation Loop Subroutine---------------------------
-
   subroutine simulate(bodies, sinks)
     implicit none
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
-    real(dp) :: t, dt, dt_candidate, end_time
+    real(dp) :: t, dt, dt_candidate, end_time, t_list(100)
     real(dp), allocatable :: vel_squared(:)
     integer :: i, number_bodies , t_test                  ! Loop index.
     t_test = 0
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 0.002_dp ! Set simulation end time.
-    dt = 0.0000001_dp          ! Set time step size.
+    end_time = 0.1_dp ! Set simulation end time.
+    t_list =  (/((i*end_time / 100), i=1, 100)/)
+    dt = 2.56e-6_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
 
     ! Main simulation loop: continue as long as current time is less than end time.
@@ -737,7 +737,7 @@ module octree_module
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
 
-      !call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
+      call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
       call sink_gravforces(bodies, sinks)
 
       !print *, 'maxacc', sqrt(sum(bodies(1)%acceleration**2))
@@ -778,7 +778,7 @@ module octree_module
       call get_density(root, bodies)
 
       ! 11. Recalculate gravitational acceleration.
-      !call particle_gravforces(root, bodies, 0.5_dp)
+      call particle_gravforces(root, bodies, 0.5_dp)
       call sink_gravforces(bodies, sinks)
       !print *, 'maxacc', sqrt(sum(bodies(1)%acceleration**2))
 
@@ -786,7 +786,6 @@ module octree_module
       call get_SPH(root, bodies)
 
       ! 13. Final update of velocities (second half-kick) and internal energies (second half-step).
-      ! The positions are also updated here with the second half-drift to complete the full step.
       call kick(bodies, sinks, dt)
 
       t = t + dt 
@@ -796,13 +795,13 @@ module octree_module
       do i = 1, number_bodies
         vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
       end do
-      dt_candidate = minval(vel_squared) * 0.01
+      dt_candidate = minval(vel_squared) * 0.1
 
       deallocate(vel_squared)
 
-      if (dt_candidate > 2*dt .and. 1.5 * dt < 1) then
+      if (dt_candidate > 2*dt .and. 1.5 * dt < 0.001) then
         dt = 1.5 * dt
-      else if (dt_candidate < 0.5 * dt .and. dt * 0.5 >0.0000001) then
+      else if (dt_candidate < 0.5 * dt .and. dt * 0.5 >0.0000005) then
         dt = 0.5 * dt
       end if
 
@@ -810,17 +809,15 @@ module octree_module
       call initiate_sink_accretion(sinks, bodies, root)
       deallocate(root) 
 
-      if (t > 0.3333_dp*end_time.and. t_test==0) then 
-        call make_save(bodies, 2)
-        t_test = 1
+      !save check
+      if (t > t_list(t_test)) then
+        call make_save(bodies, t_test)
+        t_test = t_test + 1
       end if
-      if (t > 0.6667_dp*end_time.and. t_test==1) then 
-        call make_save(bodies, 3)
-        t_test = 2
-      end if
+
     end do
 
-    call make_save(bodies, 4)
+    !call make_save(bodies, 4)
   end subroutine simulate
 end module octree_module
 
@@ -834,9 +831,9 @@ program barnes_hut
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  filename = 'keplerian_ring_big.txt'
+  filename = 'keplerian_ring_10000.txt'
 
-  call read_data_from_file(filename,bodies,5000)
+  call read_data_from_file(filename,bodies,10000)
 
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
