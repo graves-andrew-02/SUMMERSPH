@@ -3,12 +3,12 @@ module octree_module
   ! Global Parameters:
   integer, parameter :: dp = kind(1.0d0)
   real(dp), parameter :: G = 39.47841760435743 !AU^3/(Msun*yr^2) Gravitational constant (in SI units)
-  integer, parameter :: nq = 1000, max_depth = 10000          ! Number of samples for the SPH kernel lookup tables.
+  integer, parameter :: nq = 3000, max_depth = 100000          ! Number of samples for the SPH kernel lookup tables.
                                            ! This determines the resolution of the pre-computed kernel values.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 9.5e-5_dp, bounding_size = 100000.0_dp
+  real(dp), parameter :: smoothing = 5e-2_dp, bounding_size = 3.0_dp
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
@@ -46,7 +46,6 @@ module octree_module
     type(branch), allocatable :: children(:) ! Array of 8 child branches
 
   end type branch
-
   contains
 
 !---------------------------Kernel Tables and Lookup routines-----------------------------
@@ -264,18 +263,18 @@ module octree_module
 
     ! Loop through each particle in the main `body` array.
     do i = 1, size(body)
-      call SPH_tree_search(root, body(i))
+      call SPH_tree_search(root, body(i), body)
     end do
   end subroutine get_SPH
 
   ! Searches the octree for neighbors of a given 'body' particle within its smoothing length,
   ! and calculates the SPH interaction terms (pressure force and internal energy rate).
-  recursive subroutine SPH_tree_search(node, body)
+  recursive subroutine SPH_tree_search(node, body, bodies)
     implicit none
     type(branch), intent(in) :: node          ! Current octree node being examined.
-    type(particle), intent(inout) :: body     ! The single particle for which SPH interactions are calculated.
-    real(dp), dimension(3) :: over_dr, nr, dWj, vij ! over_dr: the 'overlap distance'
-    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu,viscous_cont, avg_sound_speed
+    type(particle), intent(inout) :: body, bodies(:)     ! The single particle for which SPH interactions are calculated.
+    real(dp), dimension(3) :: over_dr, nr, dWj, vij, acc_contrib ! over_dr: the 'overlap distance'
+    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu,viscous_cont, avg_sound_speed, energy_contrib
     integer :: j
     logical :: has_children
 
@@ -291,7 +290,7 @@ module octree_module
       do j = 1, size(node%children)
         ! Only recurse if the child node actually contains particles.
         if (node%children(j)%n_particles > 0) then
-          call SPH_tree_search(node%children(j), body)
+          call SPH_tree_search(node%children(j), body, bodies)
         end if
       end do
 
@@ -302,7 +301,7 @@ module octree_module
     else if (node%n_particles == 1 .and. all(abs(over_dr) < (2.0_dp*smoothing + node%size/2.0_dp))) then
       ! This is where the interaction with a single neighbor particle (node%particles(1)) occurs.
 
-      if (node%particles(1)%number == body%number) return
+      if (node%particles(1)%number >= body%number) return
       
       nr = (body%position - node%particles(1)%position) 
       dr = sqrt(sum(nr**2))
@@ -322,17 +321,23 @@ module octree_module
       mj = node%particles(1)%mass ! Mass of the neighbor particle
 
       !get viscous contributions
-      vis_nu = (smoothing * vdotr)/(dr*dr + 0.1*smoothing*smoothing)
-      avg_sound_speed = - 0.25 * (body%sound_speed + node%particles(1)%sound_speed) !average sound speed multiplied by - 1/2
-      viscous_cont = (avg_sound_speed * vis_nu + vis_nu*vis_nu) / (body%density + node%particles(1)%density)
+      vis_nu = (smoothing * vdotr)/(dr*dr + 0.01*smoothing*smoothing)
+      avg_sound_speed = 0.5*(body%sound_speed + node%particles(1)%sound_speed)
+      viscous_cont = (-avg_sound_speed * vis_nu + 2*vis_nu*vis_nu) / (0.5*(body%density + node%particles(1)%density))
+
+      ! acceleration contribution
+      acc_contrib = mj * ((body%pressure/(body%density * body%density)) + &
+                                                  (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density)) + viscous_cont) * dWj
 
       ! Accumulate SPH pressure force:
-      body%acceleration = body%acceleration - mj * ((body%pressure/(body%density * body%density)) + &
-                                                  (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density)) + viscous_cont) * dWj
+      body%acceleration = body%acceleration - acc_contrib
+      bodies(node%particles(1)%number)%acceleration = bodies(node%particles(1)%number)%acceleration + acc_contrib
 
       vdotW = sum(vij * dWj)
       ! Accumulate rate of change in internal energy:
-      body%internal_energy_rate = body%internal_energy_rate + ((body%pressure/body%density)*mj*(vdotW)) + (0.5 * viscous_cont * mj* vdotW)
+      energy_contrib = ((body%pressure/body%density)*mj*(vdotW)) + (0.5 * viscous_cont * mj* vdotW)
+      body%internal_energy_rate = body%internal_energy_rate + energy_contrib
+      bodies(node%particles(1)%number)%internal_energy_rate = bodies(node%particles(1)%number)%internal_energy_rate - energy_contrib
       return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
@@ -614,7 +619,7 @@ module octree_module
     END DO
 
     ! Close the file
-    CLOSE(UNIT=10)
+    close(UNIT=10)
 
     ! Print a confirmation message and some data (optional)
     write(*,*) 'Successfully read ', num_lines, ' lines of data from ', TRIM(filename), '.'
@@ -633,13 +638,13 @@ module octree_module
     bodies%velocity(3) = vz
     bodies%internal_energy = energy
     bodies%mass = mass
-    DEALLOCATE(x, y, z, vx, vy, vz, energy, mass)
+    deallocate(x, y, z, vx, vy, vz, energy, mass)
 
     do i =1, size(bodies)
       bodies(i)%number = i
     end do 
 
-  END SUBROUTINE read_data_from_file
+  end subroutine read_data_from_file
 
   subroutine make_save(bodies, number)
     implicit none
@@ -650,9 +655,9 @@ module octree_module
     write(savename, '(A,I0,A)') 'save', number, '.txt'
 
     open(newunit=io, file=savename, status="new", action = "write")
-    write(io, *) 'x  ','y  ','z  ','vx  ','vy ','vz ','energy ','density  ','mass  '
+    write(io, *) 'x  ','y  ','z  ','vx  ','vy ','vz ','energy ','mass  '
     do i = 1, size(bodies)
-      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%density, bodies(i)%mass
+      write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%mass
     end do  
     close(io)
 
@@ -694,14 +699,14 @@ module octree_module
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
-    real(dp) :: t, dt, dt_candidate, end_time, t_list(100)
+    real(dp) :: t, dt, dt_candidate, end_time, t_list(200)
     real(dp), allocatable :: vel_squared(:)
     integer :: i, number_bodies , t_test                  ! Loop index.
     t_test = 0
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 0.1_dp ! Set simulation end time.
-    t_list =  (/((i*end_time / 100), i=1, 100)/)
-    dt = 2.56e-6_dp          ! Set time step size.
+    end_time = 1_dp ! Set simulation end time.
+    t_list =  (/((i*end_time / 200), i=1, 200)/)
+    dt = 2.56e-5_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
 
     ! Main simulation loop: continue as long as current time is less than end time.
@@ -795,11 +800,11 @@ module octree_module
       do i = 1, number_bodies
         vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
       end do
-      dt_candidate = minval(vel_squared) * 0.1
+      dt_candidate = minval(vel_squared) * 0.025
 
       deallocate(vel_squared)
 
-      if (dt_candidate > 2*dt .and. 1.5 * dt < 0.001) then
+      if (dt_candidate > 2*dt .and. 1.5 * dt < 0.1) then
         dt = 1.5 * dt
       else if (dt_candidate < 0.5 * dt .and. dt * 0.5 >0.0000005) then
         dt = 0.5 * dt
@@ -831,14 +836,14 @@ program barnes_hut
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  filename = 'keplerian_ring_10000.txt'
+  filename = 'keplerian_ring_5000.txt'
 
-  call read_data_from_file(filename,bodies,10000)
+  call read_data_from_file(filename,bodies,5000)
 
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 0.0000000000001_dp
+  sinks(1)%radius = 0.001_dp
   sinks(1)%mass = 1.0_dp
 
   ! Start the main simulation loop.
