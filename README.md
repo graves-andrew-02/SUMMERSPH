@@ -13,5 +13,7 @@ Here's a couple of videos of what has been done so far
 
 Thin ring evolution:
 
-https://github.com/user-attachments/assets/bddf849d-02fc-4957-988b-caf95177c866
+https://github.com/user-attachments/assets/2dd1d56c-692f-472a-ac62-64fe8bb468a7
+
+
 
