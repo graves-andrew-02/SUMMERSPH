@@ -1,14 +1,15 @@
 module octree_module
+  use, intrinsic :: ieee_arithmetic
   implicit none
   ! Global Parameters:
   integer, parameter :: dp = kind(1.0d0)
   real(dp), parameter :: G = 39.47841760435743 !AU^3/(Msun*yr^2) Gravitational constant (in SI units)
-  integer, parameter :: nq = 3000, max_depth = 100000          ! Number of samples for the SPH kernel lookup tables.
+  integer, parameter :: nq = 3000, max_depth = 20000          ! Number of samples for the SPH kernel lookup tables.
                                            ! This determines the resolution of the pre-computed kernel values.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
                                                    ! and its derivative (dW/dr) values.
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 5e-2_dp, bounding_size = 3.0_dp
+  real(dp), parameter :: smoothing = 5e-2_dp, bounding_size = 10.0_dp
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
@@ -164,11 +165,11 @@ module octree_module
       node%mass_center = node%center
     end if
 
+    !if (depth < 100) return
     ! Base case for recursion:
     ! If the number of particles in the node is less than or equal to `max_particles` (making it a leaf node),
     ! OR if the maximum recursion `depth` has been reached, stop subdividing.
     if (size(node%particles) <= max_particles .or. depth == 0) return
-
     ! If not a base case, allocate 8 child nodes for this branch.
     allocate(node%children(8))
     do i = 1, 8
@@ -302,7 +303,6 @@ module octree_module
       ! This is where the interaction with a single neighbor particle (node%particles(1)) occurs.
 
       if (node%particles(1)%number >= body%number) return
-      
       nr = (body%position - node%particles(1)%position) 
       dr = sqrt(sum(nr**2))
       if (dr <= 1.0e-10) return
@@ -328,16 +328,15 @@ module octree_module
       ! acceleration contribution
       acc_contrib = mj * ((body%pressure/(body%density * body%density)) + &
                                                   (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density)) + viscous_cont) * dWj
-
-      ! Accumulate SPH pressure force:
       body%acceleration = body%acceleration - acc_contrib
       bodies(node%particles(1)%number)%acceleration = bodies(node%particles(1)%number)%acceleration + acc_contrib
-
+      !if (ieee_is_nan(avg_sound_speed)) print *, 'broke'
+      
       vdotW = sum(vij * dWj)
       ! Accumulate rate of change in internal energy:
-      energy_contrib = ((body%pressure/body%density)*mj*(vdotW)) + (0.5 * viscous_cont * mj* vdotW)
-      body%internal_energy_rate = body%internal_energy_rate + energy_contrib
-      bodies(node%particles(1)%number)%internal_energy_rate = bodies(node%particles(1)%number)%internal_energy_rate - energy_contrib
+      energy_contrib = ((body%pressure/body%density)*mj*(vdotW))
+      body%internal_energy_rate = body%internal_energy_rate + energy_contrib + (viscous_cont * mj* vdotW)
+      !bodies(node%particles(1)%number)%internal_energy_rate = bodies(node%particles(1)%number)%internal_energy_rate + ((bodies(node%particles(1)%number)%pressure/bodies(node%particles(1)%number)%density)*mj*(vdotW)) + 0.5_dp*(viscous_cont * mj* vdotW)
       return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
@@ -422,12 +421,14 @@ module octree_module
       
       node%particles(i)%density = bodies(num)%density
       if (node%particles(i)%density == 0.0_dp) stop
-      
+
       node%particles(i)%pressure = (0.66666666666666667_dp) * bodies(num)%internal_energy * bodies(num)%density
       bodies(num)%pressure = node%particles(i)%pressure
 
       node%particles(i)%sound_speed = sqrt(1.66666666666666667_dp*bodies(num)%pressure/bodies(num)%density)
       bodies(num)%sound_speed = node%particles(i)%sound_speed
+
+      if (ieee_is_nan(bodies(num)%sound_speed)) print *, 'broke'
     end do
 
     ! Recurse into children if present
@@ -557,7 +558,6 @@ module octree_module
         dr = sqrt(sum((vect_dr**2)))
 
         dist_weighting = G * vect_dr / (dr*dr*dr)
-        !print *, 'weit', vect_dr
         sinks(i)%acceleration = [0.0, 0.0,0.0 ]!sinks(i)%acceleration + (bodies(j)%mass * dist_weighting)
         bodies(j)%acceleration = bodies(j)%acceleration - (sinks(i)%mass * dist_weighting)
       end do
@@ -663,7 +663,7 @@ module octree_module
 
   end subroutine
 
-!----------------------- kick drift kick------------------------
+!----------------------- kick and drift operations------------------------
   !velocity update
   subroutine kick(bodies, sinks, dt)
     implicit none
@@ -691,7 +691,7 @@ module octree_module
     bodies%position(2) = bodies%position(2) + bodies%velocity(2)*dt
     bodies%position(3) = bodies%position(3) + bodies%velocity(3)*dt
 
-    bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
+    !bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
   end subroutine
 !-----------------------Simulation Loop Subroutine---------------------------
   subroutine simulate(bodies, sinks)
@@ -711,6 +711,9 @@ module octree_module
 
     ! Main simulation loop: continue as long as current time is less than end time.
     do while (t < end_time)
+      do i = 1, size(bodies)
+        bodies(i)%number = i
+      end do
       ! === First Half-Step of Integration ===
       number_bodies = size(bodies)
       print *,"SPH Particles:", number_bodies, "dt :", dt, "time : ", t
@@ -729,7 +732,7 @@ module octree_module
       root%n_particles = number_bodies ! Set the number of particles in the root node.
       allocate(root%particles(number_bodies)) ! Allocate space for copies of all particles in the root.
       root%particles = bodies ! Copy current particle states into the root node for tree construction.
-
+      
       ! 2. Build the octree from the current particle positions.
       call build_tree(root, max_depth, 1) 
 
@@ -738,7 +741,7 @@ module octree_module
 
       ! 4. Calculate gravitational acceleration for all particles using Barnes-Hut.
       ! Initial acceleration is reset before accumulation.
-      do i = 1, root%n_particles
+      do i = 1, size(bodies)
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
 
@@ -750,11 +753,17 @@ module octree_module
       ! 5. Calculate SPH accelerations (pressure forces) and internal energy rates.
       ! Initial internal energy rate is reset within `get_SPH` before accumulation.
       call get_SPH(root, bodies)
+
       ! 6. Update velocities (first half-kick) and internal energies (half-step).
       call kick(bodies, sinks, dt)
 
       ! 7. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
       call drift(bodies, sinks, dt)
+
+      do i = 1, size(bodies)
+        bodies(i)%number = i
+        bodies(i)%internal_energy_rate = 0
+      end do
 
       deallocate(root) ! Deallocate the current tree before rebuilding for the second half.
       ! === Second Half-Step of Integration ===
@@ -771,11 +780,10 @@ module octree_module
       root%n_particles = number_bodies
       allocate(root%particles(number_bodies))
       root%particles = bodies
-
       ! 9. Rebuild the octree.
       call build_tree(root, max_depth, 1)
 
-      do i = 1, root%n_particles
+      do i = 1, size(bodies)
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
 
@@ -795,12 +803,17 @@ module octree_module
 
       t = t + dt 
 
+      do i = 1, size(bodies)
+        bodies(i)%number = i
+        bodies(i)%internal_energy_rate = 0
+      end do
+
       !find next timestep candidate
       allocate(vel_squared(number_bodies))
       do i = 1, number_bodies
         vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
       end do
-      dt_candidate = minval(vel_squared) * 0.025
+      dt_candidate = minval(vel_squared) * 0.05
 
       deallocate(vel_squared)
 
@@ -843,7 +856,7 @@ program barnes_hut
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 0.001_dp
+  sinks(1)%radius = 0.01_dp
   sinks(1)%mass = 1.0_dp
 
   ! Start the main simulation loop.
