@@ -165,7 +165,6 @@ module octree_module
       node%mass_center = node%center
     end if
 
-    !if (depth < 100) return
     ! Base case for recursion:
     ! If the number of particles in the node is less than or equal to `max_particles` (making it a leaf node),
     ! OR if the maximum recursion `depth` has been reached, stop subdividing.
@@ -332,11 +331,11 @@ module octree_module
       bodies(node%particles(1)%number)%acceleration = bodies(node%particles(1)%number)%acceleration + acc_contrib
       !if (ieee_is_nan(avg_sound_speed)) print *, 'broke'
       
-      vdotW = sum(vij * dWj)
+      !vdotW = sum(vij * dWj)
       ! Accumulate rate of change in internal energy:
-      energy_contrib = ((body%pressure/body%density)*mj*(vdotW))
-      body%internal_energy_rate = body%internal_energy_rate + energy_contrib + (viscous_cont * mj* vdotW)
-      !bodies(node%particles(1)%number)%internal_energy_rate = bodies(node%particles(1)%number)%internal_energy_rate + ((bodies(node%particles(1)%number)%pressure/bodies(node%particles(1)%number)%density)*mj*(vdotW)) + 0.5_dp*(viscous_cont * mj* vdotW)
+      !energy_contrib = ((body%pressure/(body%density*body%density))*mj*(vdotW))
+      body%internal_energy_rate = body%internal_energy_rate + 0.5_dp * sum(acc_contrib * vij)!+ energy_contrib + (viscous_cont * mj* vdotW)
+      bodies(node%particles(1)%number)%internal_energy_rate = bodies(node%particles(1)%number)%internal_energy_rate + 0.5_dp * sum(acc_contrib * vij) !+ ((bodies(node%particles(1)%number)%pressure/(bodies(node%particles(1)%number)%density*bodies(node%particles(1)%number)%density))*mj*(vdotW)) + (viscous_cont * mj* vdotW)
       return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
@@ -486,6 +485,10 @@ module octree_module
         sum(pack(bodies%mass * bodies%position(2), .not. (keep_mask(i,:)))), &
         sum(pack(bodies%mass * bodies%position(3), .not. (keep_mask(i,:)))) ]) / (sinks(i)%mass)
       
+      sinks(i)%velocity =(sinks(i)%mass * sinks(i)%velocity + [ &
+        sum(pack(bodies%mass * bodies%velocity(1), .not. (keep_mask(i,:)))), &
+        sum(pack(bodies%mass * bodies%velocity(2), .not. (keep_mask(i,:)))), &
+        sum(pack(bodies%mass * bodies%velocity(3), .not. (keep_mask(i,:)))) ]) / (sinks(i)%mass)
       !also need somthing to track the angular momentum
 
     end do
@@ -646,10 +649,11 @@ module octree_module
 
   end subroutine read_data_from_file
 
-  subroutine make_save(bodies, number)
+  subroutine make_save(bodies, sinks ,number)
     implicit none
     integer :: io, i, number
     type(particle) :: bodies(:)
+    type(sink) :: sinks(:)
     character(len = 256) :: savename
 
     write(savename, '(A,I0,A)') 'save', number, '.txt'
@@ -658,7 +662,10 @@ module octree_module
     write(io, *) 'x  ','y  ','z  ','vx  ','vy ','vz ','energy ','mass  '
     do i = 1, size(bodies)
       write(io, *)  bodies(i)%position(1),bodies(i)%position(2),bodies(i)%position(3),bodies(i)%velocity(1),bodies(i)%velocity(2),bodies(i)%velocity(3), bodies(i)%internal_energy, bodies(i)%mass
-    end do  
+    end do 
+    do i = 1, size(sinks)
+      write(io, *) sinks(i)%position(1), sinks(i)%position(2), sinks(i)%position(3), sinks(i)%velocity(1), sinks(i)%velocity(2), sinks(i)%velocity(3), 0.0_dp, sinks(i)%mass
+    end do
     close(io)
 
   end subroutine
@@ -676,6 +683,10 @@ module octree_module
     bodies%velocity(2) = bodies%velocity(2) + 0.5_dp*bodies%acceleration(2)*dt
     bodies%velocity(3) = bodies%velocity(3) + 0.5_dp*bodies%acceleration(3)*dt
 
+    sinks%velocity(1) = sinks%velocity(1) + 0.5_dp*sinks%acceleration(1)*dt
+    sinks%velocity(2) = sinks%velocity(2) + 0.5_dp*sinks%acceleration(2)*dt
+    sinks%velocity(3) = sinks%velocity(3) + 0.5_dp*sinks%acceleration(3)*dt
+
     bodies%internal_energy = bodies%internal_energy + 0.5_dp*bodies%internal_energy_rate*dt
   end subroutine
 
@@ -691,6 +702,10 @@ module octree_module
     bodies%position(2) = bodies%position(2) + bodies%velocity(2)*dt
     bodies%position(3) = bodies%position(3) + bodies%velocity(3)*dt
 
+    sinks%position(1) = sinks%position(1) + sinks%velocity(1)*dt
+    sinks%position(2) = sinks%position(2) + sinks%velocity(2)*dt
+    sinks%position(3) = sinks%position(3) + sinks%velocity(3)*dt
+
     !bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
   end subroutine
 !-----------------------Simulation Loop Subroutine---------------------------
@@ -704,7 +719,7 @@ module octree_module
     integer :: i, number_bodies , t_test                  ! Loop index.
     t_test = 0
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 1_dp ! Set simulation end time.
+    end_time = 5_dp ! Set simulation end time.
     t_list =  (/((i*end_time / 200), i=1, 200)/)
     dt = 2.56e-5_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
@@ -735,15 +750,18 @@ module octree_module
       
       ! 2. Build the octree from the current particle positions.
       call build_tree(root, max_depth, 1) 
-
+      
       ! 3. Calculate densities for all particles using the newly built tree.
       call get_density(root, bodies)
-
+      
       ! 4. Calculate gravitational acceleration for all particles using Barnes-Hut.
       ! Initial acceleration is reset before accumulation.
       do i = 1, size(bodies)
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
+      do i = 1, size(sinks)
+        sinks(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
+      end do 
 
       call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
       call sink_gravforces(bodies, sinks)
@@ -762,7 +780,7 @@ module octree_module
 
       do i = 1, size(bodies)
         bodies(i)%number = i
-        bodies(i)%internal_energy_rate = 0
+        bodies(i)%internal_energy_rate = 0.0_dp
       end do
 
       deallocate(root) ! Deallocate the current tree before rebuilding for the second half.
@@ -786,7 +804,9 @@ module octree_module
       do i = 1, size(bodies)
         bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       end do
-
+      do i = 1, size(sinks)
+        sinks(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
+      end do 
       ! 10. Recalculate densities.
       call get_density(root, bodies)
 
@@ -802,10 +822,10 @@ module octree_module
       call kick(bodies, sinks, dt)
 
       t = t + dt 
-
+      
       do i = 1, size(bodies)
         bodies(i)%number = i
-        bodies(i)%internal_energy_rate = 0
+        bodies(i)%internal_energy_rate = 0.0_dp
       end do
 
       !find next timestep candidate
@@ -819,17 +839,17 @@ module octree_module
 
       if (dt_candidate > 2*dt .and. 1.5 * dt < 0.1) then
         dt = 1.5 * dt
-      else if (dt_candidate < 0.5 * dt .and. dt * 0.5 >0.0000005) then
+      else if (dt_candidate < 0.5 * dt .and. dt * 0.5 >0.000001) then
         dt = 0.5 * dt
       end if
-
+      
       ! Sink accretion and boundary check
       call initiate_sink_accretion(sinks, bodies, root)
       deallocate(root) 
 
       !save check
       if (t > t_list(t_test)) then
-        call make_save(bodies, t_test)
+        call make_save(bodies, sinks,t_test)
         t_test = t_test + 1
       end if
 
@@ -856,7 +876,7 @@ program barnes_hut
   allocate(sinks(1))
   sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
   sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 0.01_dp
+  sinks(1)%radius = 0.1_dp
   sinks(1)%mass = 1.0_dp
 
   ! Start the main simulation loop.
