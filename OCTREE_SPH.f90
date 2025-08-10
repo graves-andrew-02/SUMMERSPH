@@ -274,7 +274,7 @@ module octree_module
     type(branch), intent(in) :: node          ! Current octree node being examined.
     type(particle), intent(inout) :: body, bodies(:)     ! The single particle for which SPH interactions are calculated.
     real(dp), dimension(3) :: over_dr, nr, dWj, vij, acc_contrib ! over_dr: the 'overlap distance'
-    real(dp) :: Wj, dr, mj, dWj_mag, vdotW, vdotr, vis_nu,viscous_cont, avg_sound_speed, energy_contrib
+    real(dp) :: Wj, dr, mj, dWj_mag, vdotr, vis_nu,viscous_cont, avg_sound_speed
     integer :: j
     logical :: has_children
 
@@ -329,13 +329,10 @@ module octree_module
                                                   (node%particles(1)%pressure / (node%particles(1)%density * node%particles(1)%density)) + viscous_cont) * dWj
       body%acceleration = body%acceleration - acc_contrib
       bodies(node%particles(1)%number)%acceleration = bodies(node%particles(1)%number)%acceleration + acc_contrib
-      !if (ieee_is_nan(avg_sound_speed)) print *, 'broke'
-      
-      !vdotW = sum(vij * dWj)
+
       ! Accumulate rate of change in internal energy:
-      !energy_contrib = ((body%pressure/(body%density*body%density))*mj*(vdotW))
-      body%internal_energy_rate = body%internal_energy_rate + 0.5_dp * sum(acc_contrib * vij)!+ energy_contrib + (viscous_cont * mj* vdotW)
-      bodies(node%particles(1)%number)%internal_energy_rate = bodies(node%particles(1)%number)%internal_energy_rate + 0.5_dp * sum(acc_contrib * vij) !+ ((bodies(node%particles(1)%number)%pressure/(bodies(node%particles(1)%number)%density*bodies(node%particles(1)%number)%density))*mj*(vdotW)) + (viscous_cont * mj* vdotW)
+      body%internal_energy_rate = body%internal_energy_rate + 0.5_dp * sum(acc_contrib * vij)
+      bodies(node%particles(1)%number)%internal_energy_rate = bodies(node%particles(1)%number)%internal_energy_rate + 0.5_dp * sum(acc_contrib * vij)
       return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
@@ -568,86 +565,115 @@ module octree_module
   end subroutine sink_gravforces
 
 !------------------File Reading and writing---------------------------------
-  subroutine read_data_from_file(filename, bodies, max_lines)
-    implicit none
+  subroutine read_data_from_file(filename, bodies, sinks)
+      implicit none
 
-    ! Declare input argument
-    character(len=*), intent(in) :: filename
+      ! Declare input argument
+      character(len=*), intent(in) :: filename
 
-    ! Define maximum number of lines and parameters
-    integer :: max_lines! Adjust this based on your file size
-    integer :: status, num_lines, i
-    character(len=256) :: header_line
-    real(kind=8), allocatable, dimension(:) :: x, y, z, vx, vy, vz, energy, mass
-    type(particle), allocatable, intent(inout) :: bodies(:)
+      ! Variables
+      integer :: status, num_lines, i, num_bodies, num_sinks
+      character(len=256) :: header_line
+      real(kind=8), allocatable :: x(:), y(:), z(:), vx(:), vy(:), vz(:), energy(:), mass(:)
+      type(particle), allocatable, intent(inout) :: bodies(:)
+      type(sink), allocatable, intent(inout) :: sinks(:)
 
-    ! Allocate arrays
-    ALLOCATE(x(MAX_LINES), y(MAX_LINES), z(MAX_LINES), &
-             vx(MAX_LINES), vy(MAX_LINES), vz(MAX_LINES), &
-             energy(MAX_LINES), mass(MAX_LINES), STAT=status)
-    IF (status /= 0) THEN
-        WRITE(*,*) 'Error allocating memory for arrays.'
-        RETURN ! Exit the subroutine if allocation fails
-    END IF
+      ! -----------------------
+      ! First pass: count lines
+      ! -----------------------
+      num_lines = 0
+      open(unit=10, file=filename, status='old', action='read', iostat=status)
+      if (status /= 0) then
+          write(*,*) 'Error opening file: ', trim(filename)
+          return
+      end if
 
-    ! Open the file
-    OPEN(UNIT=10, FILE=filename, STATUS='OLD', ACTION='READ', IOSTAT=status)
+      read(10, '(A)', iostat=status) header_line   ! skip header
+      do
+          read(10, *, iostat=status) 
+          if (status /= 0) exit
+          num_lines = num_lines + 1
+      end do
+      close(10)
 
-    IF (status /= 0) THEN
-        WRITE(*,*) 'Error opening file: ', TRIM(filename)
-        WRITE(*,*) 'Check if the file exists and has correct permissions.'
-        DEALLOCATE(x, y, z, vx, vy, vz, energy, mass) ! Deallocate on error
-        RETURN ! Exit the subroutine on file open error
-    END IF
+      if (num_lines == 0) then
+          write(*,*) 'No data found in file: ', trim(filename)
+          return
+      end if
 
-    ! Read the header line (and discard it)
-    READ(10, '(A)') header_line
+      ! -----------------------
+      ! Allocate temporary arrays
+      ! -----------------------
+      allocate(x(num_lines), y(num_lines), z(num_lines), &
+               vx(num_lines), vy(num_lines), vz(num_lines), &
+               energy(num_lines), mass(num_lines), stat=status)
+      if (status /= 0) then
+          write(*,*) 'Error allocating memory for arrays.'
+          return
+      end if
 
-    ! Loop to read data
-    num_lines = 0
-    DO
-        READ(10, *, IOSTAT=status) x(num_lines+1), y(num_lines+1), z(num_lines+1), &
-                                   vx(num_lines+1), vy(num_lines+1), vz(num_lines+1), &
-                                   energy(num_lines+1), mass(num_lines+1)
+      ! -----------------------
+      ! Second pass: read data
+      ! -----------------------
+      open(unit=10, file=filename, status='old', action='read', iostat=status)
+      read(10, '(A)', iostat=status) header_line  ! skip header again
+      do i = 1, num_lines
+          read(10, *, iostat=status) x(i), y(i), z(i), vx(i), vy(i), vz(i), energy(i), mass(i)
+          if (status /= 0) then
+              write(*,*) 'Error reading line ', i
+              exit
+          end if
+      end do
+      close(10)
 
-        IF (status /= 0) EXIT ! Exit loop on end-of-file or error
+      ! -----------------------
+      ! Count bodies vs sinks
+      ! -----------------------
+      num_bodies = count(energy /= 0.0d0)
+      num_sinks  = count(energy == 0.0d0)
 
-        num_lines = num_lines + 1
+      allocate(bodies(num_bodies), sinks(num_sinks))
 
-        IF (num_lines > MAX_LINES) THEN
-            WRITE(*,*) 'Warning: Maximum number of lines (', MAX_LINES, ') reached for file ', TRIM(filename), '.'
-            WRITE(*,*) 'Some data might not be read. Consider increasing MAX_LINES.'
-            EXIT
-        END IF
-    END DO
+      ! -----------------------
+      ! Fill the two arrays
+      ! -----------------------
+      num_bodies = 0
+      num_sinks  = 0
+      do i = 1, num_lines
+          if (energy(i) /= 0.0d0) then
+              num_bodies = num_bodies + 1
+              bodies(num_bodies)%position(1) = x(i)
+              bodies(num_bodies)%position(2) = y(i)
+              bodies(num_bodies)%position(3) = z(i)
+              bodies(num_bodies)%velocity(1) = vx(i)
+              bodies(num_bodies)%velocity(2) = vy(i)
+              bodies(num_bodies)%velocity(3) = vz(i)
+              bodies(num_bodies)%internal_energy = energy(i)
+              bodies(num_bodies)%mass = mass(i)
+              bodies(num_bodies)%number = num_bodies
+          else
+              num_sinks = num_sinks + 1
+              sinks(num_sinks)%position(1) = x(i)
+              sinks(num_sinks)%position(2) = y(i)
+              sinks(num_sinks)%position(3) = z(i)
+              sinks(num_sinks)%velocity(1) = vx(i)
+              sinks(num_sinks)%velocity(2) = vy(i)
+              sinks(num_sinks)%velocity(3) = vz(i)
+              sinks(num_sinks)%mass = mass(i)
+              sinks(num_sinks)%radius = 0.1_dp
+          end if
+      end do
 
-    ! Close the file
-    close(UNIT=10)
+      ! -----------------------
+      ! Clean up
+      ! -----------------------
+      deallocate(x, y, z, vx, vy, vz, energy, mass)
 
-    ! Print a confirmation message and some data (optional)
-    write(*,*) 'Successfully read ', num_lines, ' lines of data from ', TRIM(filename), '.'
-    if (num_lines > 0) then
-    else
-        write(*,*) 'No data points were read from ', TRIM(filename), '.'
-    end if
-
-    allocate(bodies(size(x)))
-
-    bodies%position(1) = x
-    bodies%position(2) = y
-    bodies%position(3) = z
-    bodies%velocity(1) = vx
-    bodies%velocity(2) = vy
-    bodies%velocity(3) = vz
-    bodies%internal_energy = energy
-    bodies%mass = mass
-    deallocate(x, y, z, vx, vy, vz, energy, mass)
-
-    do i =1, size(bodies)
-      bodies(i)%number = i
-    end do 
+      write(*,*) 'Successfully read ', size(bodies), ' bodies and ', size(sinks), ' sinks from ', trim(filename), '.'
 
   end subroutine read_data_from_file
+
+
 
   subroutine make_save(bodies, sinks ,number)
     implicit none
@@ -869,15 +895,9 @@ program barnes_hut
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  filename = 'keplerian_ring_5000.txt'
+  filename = 'save200.txt'
 
-  call read_data_from_file(filename,bodies,5000)
-
-  allocate(sinks(1))
-  sinks(1)%position = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%velocity = [0.0_dp,0.0_dp,0.0_dp]
-  sinks(1)%radius = 0.1_dp
-  sinks(1)%mass = 1.0_dp
+  call read_data_from_file(filename, bodies, sinks)
 
   ! Start the main simulation loop.
   call simulate(bodies,sinks)
