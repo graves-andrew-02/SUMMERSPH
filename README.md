@@ -16,5 +16,9 @@ Thin ring evolution:
 https://github.com/user-attachments/assets/1c847663-4ca5-46ec-b540-cc8e62630e79
 
 
-
-
+# How to run
+1. go to the OCTREE_SPH.f90 and at to the bottom of the code to the "PROGRAM" section where there is a "filename equals",
+   just change this to the name of the .txt initial conditions file you choose.
+2. The file should have columns for the [x, y, z, vx, vy, vz, internal energy per unit mass, mass] of all particles including sinks.
+3. Any line with the internal energy zeroed will be read as a sink particle.
+4. I will add the need of a parameters file, as of now the code uses AU, M_sun, year units (4pi^2 = G) and the end time can be adjusted in the 
