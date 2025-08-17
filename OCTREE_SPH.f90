@@ -816,43 +816,43 @@ module octree_module
       
       ! 1. Allocate and initialize the root node for tree building.
       allocate(root)
-
       call create_tree(root, bodies, max_depth)
       
-      ! 3. Calculate densities for all particles using the newly built tree.
+      ! 2. Calculate densities and pressure values
       call get_density(root, bodies)
       call get_pressure_and_sound_speed(bodies)
       
-      ! 4. Calculate gravitational acceleration for all particles using Barnes-Hut.
-      ! Initial acceleration is reset before accumulation.
+      ! 3. Calculate gravitational acceleration.
       call find_forces(root, bodies, sinks)
 
-      ! 6. Update velocities (first half-kick) and internal energies (half-step).
+      ! 4. Update velocities (first half-kick) and internal energies (half-step).
       call kick(bodies, sinks, dt)
 
-      ! 7. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
+      ! 5. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
       call drift(bodies, sinks, dt)
 
+      ! 6. reset numbers and deallocate the tree
       do i = 1, size(bodies)
         bodies(i)%number = i
       end do
 
-      deallocate(root) ! Deallocate the current tree before rebuilding for the second half.
-      ! === Second Half-Step of Integration ===
-      ! Recalculate forces based on the new (half-drifted) positions for the second kick.
-      ! 8. Re-allocate and re-initialize the root node with the updated positions.
+      deallocate(root)
+
+      ! 7. Re-allocate and re-initialize the root node with the updated positions.
       allocate(root)
       call create_tree(root, bodies, max_depth)
 
-      ! 10. Recalculate densities.
+      ! 8. Recalculate densities.
       call get_density(root, bodies)
       call get_pressure_and_sound_speed(bodies)
 
+      ! 9. get all accelerations
       call find_forces(root, bodies, sinks)
 
-      ! 13. Final update of velocities (second half-kick) and internal energies (second half-step).
+      ! 10. Final update of velocities (second half-kick) and internal energies (second half-step).
       call kick(bodies, sinks, dt)
       
+
       t = t + dt 
 
       !find next timestep candidate
