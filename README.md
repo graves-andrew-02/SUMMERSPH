@@ -1,6 +1,6 @@
-# SPH
+# SUMMERSPH - Overview
 
-This is a Summer Project because I am very bored, and it might be cool.
+This is a Summer Project because I am very, very bored, and it might be cool.
 
 # Goals:
 1. make an sph code that doesnt completely suck and runs on a laptop
