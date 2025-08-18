@@ -539,11 +539,31 @@ module octree_module
         dr = sqrt(sum((vect_dr**2)))
 
         dist_weighting = G * vect_dr / (dr*dr*dr)
-        sinks(i)%acceleration = [0.0, 0.0,0.0 ]!sinks(i)%acceleration + (bodies(j)%mass * dist_weighting)
+        sinks(i)%acceleration = sinks(i)%acceleration + (bodies(j)%mass * dist_weighting)
         bodies(j)%acceleration = bodies(j)%acceleration - (sinks(i)%mass * dist_weighting)
       end do
     end do
   end subroutine sink_gravforces
+
+  !singular particle version
+
+  subroutine sink_gravone(body, sinks)
+    implicit none
+    type(particle), intent(inout) :: body
+    type(sink), intent(inout) :: sinks(:)
+    real(dp) :: dr
+    real(dp), dimension(3) :: vect_dr, dist_weighting
+    integer :: i
+
+    do i = 1, size(sinks)
+        vect_dr = body%position - sinks(i)%position
+        dr = sqrt(sum((vect_dr**2)))
+
+        dist_weighting = G * vect_dr / (dr*dr*dr)
+        !sinks(i)%acceleration = [0.0, 0.0,0.0 ]!sinks(i)%acceleration + (bodies(j)%mass * dist_weighting)
+        body%acceleration = body%acceleration - (sinks(i)%mass * dist_weighting)
+    end do
+  end subroutine sink_gravone
 
 !------------------File Reading and writing---------------------------------
   subroutine read_data_from_file(filename, bodies, sinks)
@@ -775,7 +795,7 @@ module octree_module
     type(sink), intent(inout) :: sinks(:)
 
     call zero_rates(sinks, bodies)
-    call particle_gravforces(root, bodies, 0.25_dp) ! theta criterion 0.25.
+    call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.25.
     call sink_gravforces(bodies, sinks)
 
     call get_SPH(root, bodies)
@@ -789,7 +809,7 @@ module octree_module
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
     real(dp) :: t, dt, dt_candidate, end_time, t_list(150)
-    real(dp), allocatable :: vel_squared(:), u_candidate(:), pred_energy(:),pred_energy_rate(:)
+    real(dp), allocatable :: vel_squared(:), u_candidate(:)
     integer :: i, number_bodies , t_test
 
     t_test = 0 !variable for checking the save number
@@ -830,6 +850,7 @@ module octree_module
 
       ! 5. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
       call drift(bodies, sinks, dt)
+      call kick(bodies, sinks, dt) !pred
 
       ! 6. reset numbers and deallocate the tree
       do i = 1, size(bodies)
@@ -897,7 +918,7 @@ program barnes_hut
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  filename = 'keplerian_ring_5000.txt'
+  filename = 'keplerian_disc_2500.txt'
   !read *, filename
   call read_data_from_file(filename, bodies, sinks)
 
