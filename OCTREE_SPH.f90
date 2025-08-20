@@ -4,11 +4,11 @@ module octree_module
   ! Global Parameters:
   integer, parameter :: dp = kind(1.0d0)
   real(dp), parameter :: G = 39.47841760435743 !AU^3/(Msun*yr^2) Gravitational constant (in SI units)
-  integer, parameter :: nq = 3000, max_depth = 20000          ! Number of samples for the SPH kernel lookup tables.
+  integer, parameter :: nq = 5000, max_depth = 20000          ! Number of samples for the SPH kernel lookup tables.
                                            ! This determines the resolution of the pre-computed kernel values.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 5e-2_dp, bounding_size = 10.0_dp
+  real(dp), parameter :: smoothing = 2.5e-2_dp, bounding_size = 10.0_dp
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
@@ -719,15 +719,15 @@ module octree_module
     real(dp), intent(in) :: dt
 
     !v(i+0.5)
-    bodies%velocity(1) = bodies%velocity(1) + 0.5_dp*bodies%acceleration(1)*dt
-    bodies%velocity(2) = bodies%velocity(2) + 0.5_dp*bodies%acceleration(2)*dt
-    bodies%velocity(3) = bodies%velocity(3) + 0.5_dp*bodies%acceleration(3)*dt
+    bodies%velocity(1) = bodies%velocity(1) + bodies%acceleration(1)*dt
+    bodies%velocity(2) = bodies%velocity(2) + bodies%acceleration(2)*dt
+    bodies%velocity(3) = bodies%velocity(3) + bodies%acceleration(3)*dt
 
-    bodies%internal_energy = bodies%internal_energy + 0.5_dp * bodies%internal_energy_rate*dt
+    !bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
 
-    sinks%velocity(1) = sinks%velocity(1) + 0.5_dp*sinks%acceleration(1)*dt
-    sinks%velocity(2) = sinks%velocity(2) + 0.5_dp*sinks%acceleration(2)*dt
-    sinks%velocity(3) = sinks%velocity(3) + 0.5_dp*sinks%acceleration(3)*dt
+    sinks%velocity(1) = sinks%velocity(1) + sinks%acceleration(1)*dt
+    sinks%velocity(2) = sinks%velocity(2) + sinks%acceleration(2)*dt
+    sinks%velocity(3) = sinks%velocity(3) + sinks%acceleration(3)*dt
   end subroutine
 
   !position update
@@ -738,15 +738,15 @@ module octree_module
     real(dp), intent(in) :: dt
 
     !x(i+1)
-    bodies%position(1) = bodies%position(1) + bodies%velocity(1)*dt
-    bodies%position(2) = bodies%position(2) + bodies%velocity(2)*dt
-    bodies%position(3) = bodies%position(3) + bodies%velocity(3)*dt
+    bodies%position(1) = bodies%position(1) + 0.5_dp*bodies%velocity(1)*dt
+    bodies%position(2) = bodies%position(2) + 0.5_dp*bodies%velocity(2)*dt
+    bodies%position(3) = bodies%position(3) + 0.5_dp*bodies%velocity(3)*dt
 
-    sinks%position(1) = sinks%position(1) + sinks%velocity(1)*dt
-    sinks%position(2) = sinks%position(2) + sinks%velocity(2)*dt
-    sinks%position(3) = sinks%position(3) + sinks%velocity(3)*dt
+    sinks%position(1) = sinks%position(1) + 0.5_dp*sinks%velocity(1)*dt
+    sinks%position(2) = sinks%position(2) + 0.5_dp*sinks%velocity(2)*dt
+    sinks%position(3) = sinks%position(3) + 0.5_dp*sinks%velocity(3)*dt
 
-    !bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
+    bodies%internal_energy = bodies%internal_energy + 0.5_dp*bodies%internal_energy_rate*dt
   end subroutine
 
 !--------------------grouping subroutines-----------------------------
@@ -795,12 +795,42 @@ module octree_module
     type(sink), intent(inout) :: sinks(:)
 
     call zero_rates(sinks, bodies)
-    call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.25.
+    call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
     call sink_gravforces(bodies, sinks)
 
     call get_SPH(root, bodies)
    
   end subroutine find_forces
+
+  subroutine get_next_timestep(bodies, dt)
+    implicit none
+    integer :: i, number_bodies
+    real(dp), intent(inout) :: dt
+    type(particle), intent(in) :: bodies(:)
+    real(dp), allocatable :: vel_squared(:), u_candidate(:), h_candidate(:)
+    real(dp) :: dt_candidate
+
+    number_bodies = size(bodies)
+    allocate(vel_squared(number_bodies)) !from grav
+    allocate(u_candidate(number_bodies)) !from sound speed
+    allocate(h_candidate(number_bodies)) !from smoothing
+
+    do i = 1, number_bodies
+      vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
+      u_candidate(i) = bodies(i)%internal_energy / abs(bodies(i)%internal_energy_rate)
+      h_candidate(i) = smoothing / sqrt(sum(bodies(i)%velocity*bodies(i)%velocity))
+    end do
+    dt_candidate = minval([vel_squared, u_candidate, h_candidate]) * 0.05
+
+    deallocate(vel_squared, u_candidate, h_candidate)
+
+    if (dt_candidate > 2*dt .and. 1.5 * dt < 0.1) then
+      dt = 1.5 * dt
+    else if (dt_candidate < 0.5 * dt .and. dt * 0.5 > 0.0000001) then
+      dt = 0.5 * dt
+    end if
+
+  end subroutine get_next_timestep
 
 !-----------------------Simulation Loop Subroutine---------------------------
   subroutine simulate(bodies, sinks)
@@ -808,15 +838,15 @@ module octree_module
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
-    real(dp) :: t, dt, dt_candidate, end_time, t_list(150)
-    real(dp), allocatable :: vel_squared(:), u_candidate(:)
+    real(dp) :: t, dt, end_time, t_list(150)
+    real(dp), allocatable :: v_initial(:,:), pos_initial(:,:), u_initial(:)
     integer :: i, number_bodies , t_test
 
     t_test = 0 !variable for checking the save number
     t = 0.0_dp         ! Initialize simulation time.
     end_time = 3_dp ! Set simulation end time.
     t_list =  (/((i*end_time / 150), i=1, 150)/)
-    dt = 2.56e-7_dp          ! Set time step size.
+    dt = 1.0e-4_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
 
     ! Main simulation loop: continue as long as current time is less than end time.
@@ -836,68 +866,57 @@ module octree_module
       
       ! 1. Allocate and initialize the root node for tree building.
       allocate(root)
+
+      !call check_allocations() !need to write this first
+
+      allocate(pos_initial(3,number_bodies), u_initial(number_bodies))
+      allocate(v_initial(3,number_bodies))
+      v_initial(1,:) = bodies%velocity(1)
+      v_initial(2,:) = bodies%velocity(2)
+      v_initial(3,:) = bodies%velocity(3)
+      pos_initial(1,:) = bodies%position(1)
+      pos_initial(2,:) = bodies%position(2)
+      pos_initial(3,:) = bodies%position(3)
+      u_initial = bodies%internal_energy
+
       call create_tree(root, bodies, max_depth)
-      
-      ! 2. Calculate densities and pressure values
       call get_density(root, bodies)
       call get_pressure_and_sound_speed(bodies)
-      
-      ! 3. Calculate gravitational acceleration.
       call find_forces(root, bodies, sinks)
 
-      ! 4. Update velocities (first half-kick) and internal energies (half-step).
+      ! 4. Update positions (first half-drift)
+      call drift(bodies, sinks, dt)
+      deallocate(root)
+      
       call kick(bodies, sinks, dt)
 
-      ! 5. Update positions (first half-drift), and reset accelerations/internal_energy_rates for next force calculation.
-      call drift(bodies, sinks, dt)
-      call kick(bodies, sinks, dt) !pred
+      allocate(root)
+      call create_tree(root, bodies, max_depth)
+      call get_density(root, bodies)
+      call get_pressure_and_sound_speed(bodies)
+      call find_forces(root, bodies, sinks)
 
-      ! 6. reset numbers and deallocate the tree
+
+      bodies%velocity(1) = v_initial(1,:) + dt*bodies%acceleration(1)
+      bodies%velocity(2) = v_initial(2,:) + dt*bodies%acceleration(2)
+      bodies%velocity(3) = v_initial(3,:) + dt*bodies%acceleration(3)
+
+      bodies%internal_energy = u_initial + dt* bodies%internal_energy_rate
+
+      bodies%position(1) = pos_initial(1,:) + 0.5_dp*dt*(v_initial(1,:) + bodies%velocity(1))
+      bodies%position(2) = pos_initial(2,:) + 0.5_dp*dt*(v_initial(2,:) + bodies%velocity(2))
+      bodies%position(3) = pos_initial(3,:) + 0.5_dp*dt*(v_initial(3,:) + bodies%velocity(3))
+
       do i = 1, size(bodies)
         bodies(i)%number = i
       end do
 
-      deallocate(root)
-
-      ! 7. Re-allocate and re-initialize the root node with the updated positions.
-      allocate(root)
-      call create_tree(root, bodies, max_depth)
-
-      ! 8. Recalculate densities.
-      call get_density(root, bodies)
-      call get_pressure_and_sound_speed(bodies)
-
-      ! 9. get all accelerations
-      call find_forces(root, bodies, sinks)
-
-      ! 10. Final update of velocities (second half-kick) and internal energies (second half-step).
-      call kick(bodies, sinks, dt)
-      
+      deallocate(pos_initial,u_initial)
+      deallocate(v_initial)
 
       t = t + dt 
 
-      !find next timestep candidate
-      allocate(vel_squared(number_bodies))
-      allocate(u_candidate(number_bodies))
-
-      do i = 1, number_bodies
-        vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
-        u_candidate(i) = bodies(i)%internal_energy / abs(bodies(i)%internal_energy_rate)
-      end do
-      dt_candidate = minval([vel_squared, u_candidate]) * 0.05
-
-      deallocate(vel_squared)
-      deallocate(u_candidate)
-
-      if (dt_candidate > 2*dt .and. 1.5 * dt < 0.1) then
-        dt = 1.5 * dt
-      else if (dt_candidate < 0.5 * dt .and. dt * 0.5 > 0.0000001) then
-        dt = 0.5 * dt
-      end if
-
-      do i = 1, size(bodies)
-        bodies(i)%number = i
-      end do
+      call get_next_timestep(bodies, dt)
 
       ! Sink accretion and boundary check
       call initiate_sink_accretion(sinks, bodies, root)
