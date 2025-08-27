@@ -13,11 +13,13 @@ Here's a couple of videos of what has been done so far
 
 Thin ring evolution:
 
-https://github.com/user-attachments/assets/1c847663-4ca5-46ec-b540-cc8e62630e79
+https://github.com/user-attachments/assets/df89fe05-3852-4479-b3c9-319c9d578eed
+
+
 
 
 # How to run
-1. go to the OCTREE_SPH.f90 and at to the bottom of the code to the "PROGRAM" section where there is a "filename equals",
+1. go to the SUMMERSPH.f90 and at to the bottom of the code to the "PROGRAM" section where there is a "filename equals",
    just change this to the name of the .txt initial conditions file you choose.
 2. The file should have columns for the [x, y, z, vx, vy, vz, internal energy per unit mass, mass] of all particles including sinks.
 3. Any line with the internal energy zeroed will be read as a sink particle.
