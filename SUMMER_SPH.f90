@@ -13,12 +13,15 @@ module SPH_routines_module
   ! Represents a single SPH particle with its physical properties.
   type :: particle
     integer :: number !this is just an identifier so we dont have to sync everything with the tree constantly
+    integer :: level !level of substepping. level 1 is on ones, 2 is on every second step, 3 is on every 4th. ie: 2^(n-1)
     real(dp) :: mass
     real(dp) :: density
     real(dp) :: internal_energy
     real(dp) :: pressure
     real(dp) :: sound_speed
     real(dp) :: internal_energy_rate  
+    real(dp) :: viscous_parameter
+    real(dp) :: div_vel
     real(dp), dimension(3) :: position 
     real(dp), dimension(3) :: velocity 
     real(dp), dimension(3) :: acceleration 
@@ -110,7 +113,7 @@ module SPH_routines_module
     qi = r / hi
     ! Check if the normalized distance is within the kernel's compact support [0, 2]
     if (qi >= 0.0_dp .and. qi <= 2.0_dp) then
-      i = int(qi / dq) 
+      i = min(int(qi/dq), nq-1)
       alpha = (qi - i * dq) / dq 
       ! Perform linear interpolation to get the kernel and derivative values
       Wi = (1.0_dp - alpha) * w_table(i) + alpha * w_table(i+1)
@@ -120,6 +123,9 @@ module SPH_routines_module
       Wi = 0.0_dp
       dWi = 0.0_dp
     end if
+
+    Wi = Wi *(2/(3*smoothing))!/ (3.14159265359_dp * smoothing**3)
+    dWi = dWi*(2/(3*smoothing*smoothing))! / (3.14159265359_dp * smoothing**4)
   end subroutine lookup_kernel
 
   subroutine lookup_grav_kernel(r, hi, Wi)
@@ -229,11 +235,11 @@ module SPH_routines_module
   ! Loop over the (single) particle provided in the 'body' array slice.
   do i = 1, size(body)
     direction = body(i)%position - node%mass_center ! Vector pointing from particle to the node's center of mass
-    d2 = sum(direction**2) + smoothing**2 
+    d2 = sum(direction**2)
     dist = sqrt(d2)  
 
     ! Barnes-Hut criterion:
-    if ((node%size / dist) < theta .or. .not. allocated(node%children)) then
+    if ((node%size / (dist + 1e-18_dp)) < theta .or. .not. allocated(node%children)) then
       ! Calculate gravitational acceleration if the node has mass and distance is positive.
       if (node%mass_total > 0.0_dp .and. dist > 0.0_dp) then
         call lookup_grav_kernel(dist, smoothing, W)
@@ -273,7 +279,7 @@ module SPH_routines_module
     type(branch), intent(in) :: node          ! Current octree node being examined.
     type(particle), intent(inout) :: body, bodies(:)     ! The single particle for which SPH interactions are calculated.
     real(dp), dimension(3) :: over_dr, nr, dWj, vij, acc_contrib ! over_dr: the 'overlap distance'
-    real(dp) :: Wj, dr, mj, dWj_mag, vdotr, vis_nu,viscous_cont, avg_sound_speed
+    real(dp) :: Wj, dr, mj, dWj_mag, vdotr, vis_nu,viscous_cont, avg_sound_speed, vdotgradW, average_visc_const, div_cont
     integer :: j, num
     logical :: has_children
 
@@ -315,24 +321,31 @@ module SPH_routines_module
       ! Lookup kernel (W) and derivative (dW/dr) values for the calculated distance 'dr'.
       call lookup_kernel(dr, smoothing, Wj, dWj_mag)
       ! Normalize kernel and its gradient for 3D cubic spline:
-      Wj = Wj / (3.14159265359_dp * smoothing**3)
-      dWj = nr * dWj_mag / (3.14159265359_dp * smoothing**4)
+      dWj = nr * dWj_mag
       mj = node%particles(1)%mass ! Mass of the neighbor particle
+      vdotgradW = dot_product(dWj, vij)
 
       !get viscous contributions
       vis_nu = (smoothing * vdotr)/(dr*dr + 0.01*smoothing*smoothing)
       avg_sound_speed = 0.5*(body%sound_speed + bodies(num)%sound_speed)
-      viscous_cont = (-avg_sound_speed * vis_nu + 2*vis_nu*vis_nu) / (0.5*(body%density + bodies(num)%density))
+      average_visc_const = 1.0_dp !0.5*(body%viscous_parameter + bodies(num)%viscous_parameter)
+
+      viscous_cont = (-average_visc_const*avg_sound_speed * vis_nu + 2*average_visc_const*vis_nu*vis_nu) / (0.5*(body%density + bodies(num)%density))
 
       ! acceleration contribution
       acc_contrib = mj * ((body%pressure/(body%density * body%density)) + &
                                         (bodies(num)%pressure / (bodies(num)%density * bodies(num)%density)) + viscous_cont) * dWj
       body%acceleration = body%acceleration - acc_contrib
-      bodies(num)%acceleration = bodies(node%particles(1)%number)%acceleration + acc_contrib
+      bodies(num)%acceleration = bodies(num)%acceleration + acc_contrib
 
       ! Accumulate rate of change in internal energy:
-      body%internal_energy_rate = body%internal_energy_rate + 0.5_dp * dot_product(acc_contrib, vij)
-      bodies(num)%internal_energy_rate = bodies(num)%internal_energy_rate + 0.5_dp * dot_product(acc_contrib, vij)
+      body%internal_energy_rate = body%internal_energy_rate + mj * vdotgradW *((body%pressure/(body%density * body%density))  + 0.5_dp * viscous_cont)
+      bodies(num)%internal_energy_rate = bodies(num)%internal_energy_rate + mj * vdotgradW *((bodies(num)%pressure/(bodies(num)%density * bodies(num)%density))  + 0.5_dp *viscous_cont)
+
+      ! Finally we add to the div_vel term for each body to be used later when doing viscosity constants updates
+      !div_cont = mj *(dot_product((body%velocity/(body%density * body%density)) + (bodies(num)%velocity / (bodies(num)%density * bodies(num)%density)), dWj))
+      !body%div_vel = body%div_vel + body%density*div_cont  !mj*vdotgradW/body%density
+      !bodies(num)%div_vel = bodies(num)%div_vel + bodies(num)%density*div_cont !mj*vdotgradW/bodies(num)%density
       return 
     end if
     ! If neither recursion nor leaf node interaction conditions are met, simply return.
@@ -354,10 +367,6 @@ module SPH_routines_module
       ! Search the tree to find all neighbors and accumulate density contributions for `body(i)`.
       call density_tree_search(root, body(i))
     end do
-
-    !now distribute the density to the tree
-    !call get_pressure_and_sound_speed(bodies)
-
   end subroutine get_density
 
   ! Recursively traverses the octree to find neighbors for a given 'body' particle
@@ -396,7 +405,6 @@ module SPH_routines_module
       ! Lookup kernel (W) value for the calculated distance 'dr'.
       call lookup_kernel(dr, smoothing, Wj, dWj_mag) ! dWj_mag is not used for density, but still returned.
       ! Normalize kernel for 3D cubic spline.
-      Wj = Wj / (3.14159265359_dp * smoothing**3)
       mj = node%particles(1)%mass ! Mass of the neighbor particle
 
       ! Accumulate density for the 'body' particle: rho_i = sum_j m_j * W_ij
@@ -655,6 +663,8 @@ module SPH_routines_module
               bodies(num_bodies)%internal_energy = energy(i)
               bodies(num_bodies)%mass = mass(i)
               bodies(num_bodies)%number = num_bodies
+              bodies(num_bodies)%viscous_parameter = 0.1_dp
+              bodies(num_bodies)%div_vel = 0.0_dp
           else
               num_sinks = num_sinks + 1
               sinks(num_sinks)%position(1) = x(i)
@@ -664,7 +674,7 @@ module SPH_routines_module
               sinks(num_sinks)%velocity(2) = vy(i)
               sinks(num_sinks)%velocity(3) = vz(i)
               sinks(num_sinks)%mass = mass(i)
-              sinks(num_sinks)%radius = 0.1_dp
+              sinks(num_sinks)%radius = 0.2_dp
           end if
       end do
 
@@ -718,35 +728,35 @@ module SPH_routines_module
     type(sink), intent(inout) :: sinks(:)
     real(dp), intent(in) :: dt
 
-    !v(i+0.5)
-    bodies%velocity(1) = bodies%velocity(1) + bodies%acceleration(1)*dt
-    bodies%velocity(2) = bodies%velocity(2) + bodies%acceleration(2)*dt
-    bodies%velocity(3) = bodies%velocity(3) + bodies%acceleration(3)*dt
+    !v(i+1)
+    bodies%velocity(1) = bodies%velocity(1) + 0.5_dp * bodies%acceleration(1)*dt
+    bodies%velocity(2) = bodies%velocity(2) + 0.5_dp * bodies%acceleration(2)*dt
+    bodies%velocity(3) = bodies%velocity(3) + 0.5_dp * bodies%acceleration(3)*dt
 
-    !bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
-
-    sinks%velocity(1) = sinks%velocity(1) + sinks%acceleration(1)*dt
-    sinks%velocity(2) = sinks%velocity(2) + sinks%acceleration(2)*dt
-    sinks%velocity(3) = sinks%velocity(3) + sinks%acceleration(3)*dt
+    sinks%velocity(1) = sinks%velocity(1) + 0.5_dp *sinks%acceleration(1)*dt
+    sinks%velocity(2) = sinks%velocity(2) + 0.5_dp *sinks%acceleration(2)*dt
+    sinks%velocity(3) = sinks%velocity(3) + 0.5_dp *sinks%acceleration(3)*dt
   end subroutine
 
-  !position update
+  !position update and stuff the acceleration is dependent on
   subroutine drift(bodies, sinks, dt)
     implicit none
     type(particle), intent(inout) :: bodies(:)
     type(sink), intent(inout) :: sinks(:)
     real(dp), intent(in) :: dt
 
-    !x(i+1)
-    bodies%position(1) = bodies%position(1) + 0.5_dp*bodies%velocity(1)*dt
-    bodies%position(2) = bodies%position(2) + 0.5_dp*bodies%velocity(2)*dt
-    bodies%position(3) = bodies%position(3) + 0.5_dp*bodies%velocity(3)*dt
+    !x(i+0.5)
+    bodies%position(1) = bodies%position(1) + bodies%velocity(1)*dt
+    bodies%position(2) = bodies%position(2) + bodies%velocity(2)*dt
+    bodies%position(3) = bodies%position(3) + bodies%velocity(3)*dt
 
-    sinks%position(1) = sinks%position(1) + 0.5_dp*sinks%velocity(1)*dt
-    sinks%position(2) = sinks%position(2) + 0.5_dp*sinks%velocity(2)*dt
-    sinks%position(3) = sinks%position(3) + 0.5_dp*sinks%velocity(3)*dt
+    sinks%position(1) = sinks%position(1) + sinks%velocity(1)*dt
+    sinks%position(2) = sinks%position(2) + sinks%velocity(2)*dt
+    sinks%position(3) = sinks%position(3) + sinks%velocity(3)*dt
 
-    bodies%internal_energy = bodies%internal_energy + 0.5_dp*bodies%internal_energy_rate*dt
+    bodies%internal_energy = bodies%internal_energy + bodies%internal_energy_rate*dt
+
+    !bodies%viscous_parameter = bodies%viscous_parameter + dt* (max(-bodies%div_vel, 0.0_dp) + (0.1_dp - bodies%viscous_parameter)/(0.2_dp*smoothing/bodies%sound_speed))
   end subroutine
 
 !--------------------grouping subroutines-----------------------------
@@ -759,6 +769,7 @@ module SPH_routines_module
     do i = 1, size(bodies)
       bodies(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
       bodies(i)%internal_energy_rate = 0.0_dp
+      bodies(i)%div_vel = 0.0_dp
     end do
     do i = 1, size(sinks)
       sinks(i)%acceleration = [0.0_dp, 0.0_dp, 0.0_dp]
@@ -797,7 +808,6 @@ module SPH_routines_module
     call zero_rates(sinks, bodies)
     call particle_gravforces(root, bodies, 0.5_dp) ! theta criterion 0.5.
     call sink_gravforces(bodies, sinks)
-
     call get_SPH(root, bodies)
    
   end subroutine find_forces
@@ -814,22 +824,23 @@ module SPH_routines_module
     allocate(vel_squared(number_bodies)) !from grav
     allocate(u_candidate(number_bodies)) !from sound speed
     allocate(h_candidate(number_bodies)) !from smoothing
+    !allocate(cfl_candidate(number_bodies)) !for shocks, but done in a shit way
 
     do i = 1, number_bodies
       vel_squared(i) = sqrt(sum(bodies(i)%velocity * bodies(i)%velocity)/sum(bodies(i)%acceleration * bodies(i)%acceleration))
       u_candidate(i) = bodies(i)%internal_energy / abs(bodies(i)%internal_energy_rate)
       h_candidate(i) = smoothing / sqrt(sum(bodies(i)%velocity*bodies(i)%velocity))
+      !cfl_candidate(i) = smoothing / (bodies(i)%sound_speed + bodies(i)%sound_speed)
     end do
-    dt_candidate = minval([vel_squared, u_candidate, h_candidate]) * 0.05
+    dt_candidate = minval([vel_squared, u_candidate, h_candidate]) * 0.5
 
     deallocate(vel_squared, u_candidate, h_candidate)
 
     if (dt_candidate > 2*dt .and. 1.5 * dt < 0.1) then
       dt = 1.5 * dt
-    else if (dt_candidate < 0.5 * dt .and. dt * 0.5 > 0.0000001) then
+    else if (dt_candidate < 0.5 * dt .and. dt * 0.5 > 0.00000001) then
       dt = 0.5 * dt
     end if
-
   end subroutine get_next_timestep
 
 !-----------------------Simulation Loop Subroutine---------------------------
@@ -839,17 +850,18 @@ module SPH_routines_module
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
     real(dp) :: t, dt, end_time, t_list(150)
-    real(dp), allocatable :: v_initial(:,:), pos_initial(:,:), u_initial(:)
-    integer :: i, number_bodies , t_test
+    real(dp), allocatable :: v_initial(:,:), pos_initial(:,:), u_initial(:), vis_initial(:)
+    integer :: i, number_bodies , t_test, new_number_bodies
 
     t_test = 0 !variable for checking the save number
     t = 0.0_dp         ! Initialize simulation time.
     end_time = 3_dp ! Set simulation end time.
     t_list =  (/((i*end_time / 150), i=1, 150)/)
-    dt = 1.0e-4_dp          ! Set time step size.
+    dt = 1.0e-8_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
-
+    new_number_bodies = number_bodies
     ! Main simulation loop: continue as long as current time is less than end time.
+    allocate(pos_initial(3,number_bodies), u_initial(number_bodies), vis_initial(number_bodies),v_initial(3,number_bodies))
     do while (t < end_time)
       !save check
       if (t > t_list(t_test)) then
@@ -867,28 +879,27 @@ module SPH_routines_module
       ! 1. Allocate and initialize the root node for tree building.
       allocate(root)
 
-      !call check_allocations() !need to write this first
-
-      allocate(pos_initial(3,number_bodies), u_initial(number_bodies))
-      allocate(v_initial(3,number_bodies))
-      v_initial(1,:) = bodies%velocity(1)
-      v_initial(2,:) = bodies%velocity(2)
-      v_initial(3,:) = bodies%velocity(3)
-      pos_initial(1,:) = bodies%position(1)
-      pos_initial(2,:) = bodies%position(2)
-      pos_initial(3,:) = bodies%position(3)
-      u_initial = bodies%internal_energy
+      !check if allocations have changed
+      !if (number_bodies /= new_number_bodies) allocate(pos_initial(3,number_bodies), u_initial(number_bodies), vis_initial(number_bodies),v_initial(3,number_bodies))
+!
+      !v_initial(1,:) = bodies%velocity(1)
+      !v_initial(2,:) = bodies%velocity(2)
+      !v_initial(3,:) = bodies%velocity(3)
+      !pos_initial(1,:) = bodies%position(1)
+      !pos_initial(2,:) = bodies%position(2)
+      !pos_initial(3,:) = bodies%position(3)
+      !u_initial = bodies%internal_energy
+      !vis_initial = bodies%viscous_parameter
 
       call create_tree(root, bodies, max_depth)
       call get_density(root, bodies)
       call get_pressure_and_sound_speed(bodies)
       call find_forces(root, bodies, sinks)
 
-      ! 4. Update positions (first half-drift)
-      call drift(bodies, sinks, dt)
+      call kick(bodies, sinks, dt)
       deallocate(root)
       
-      call kick(bodies, sinks, dt)
+      call drift(bodies, sinks, dt)
 
       allocate(root)
       call create_tree(root, bodies, max_depth)
@@ -896,23 +907,7 @@ module SPH_routines_module
       call get_pressure_and_sound_speed(bodies)
       call find_forces(root, bodies, sinks)
 
-
-      bodies%velocity(1) = v_initial(1,:) + dt*bodies%acceleration(1)
-      bodies%velocity(2) = v_initial(2,:) + dt*bodies%acceleration(2)
-      bodies%velocity(3) = v_initial(3,:) + dt*bodies%acceleration(3)
-
-      bodies%internal_energy = u_initial + dt* bodies%internal_energy_rate
-
-      bodies%position(1) = pos_initial(1,:) + 0.5_dp*dt*(v_initial(1,:) + bodies%velocity(1))
-      bodies%position(2) = pos_initial(2,:) + 0.5_dp*dt*(v_initial(2,:) + bodies%velocity(2))
-      bodies%position(3) = pos_initial(3,:) + 0.5_dp*dt*(v_initial(3,:) + bodies%velocity(3))
-
-      do i = 1, size(bodies)
-        bodies(i)%number = i
-      end do
-
-      deallocate(pos_initial,u_initial)
-      deallocate(v_initial)
+      call kick(bodies, sinks, dt)
 
       t = t + dt 
 
@@ -920,6 +915,15 @@ module SPH_routines_module
 
       ! Sink accretion and boundary check
       call initiate_sink_accretion(sinks, bodies, root)
+
+      do i = 1, size(bodies)
+        bodies(i)%number = i
+      end do
+
+      new_number_bodies = size(bodies)
+
+      !deallocate stuff if any accretion has happened
+      !if (number_bodies /= new_number_bodies) deallocate(pos_initial, u_initial, v_initial,vis_initial)
 
       deallocate(root) 
     end do
@@ -942,6 +946,7 @@ program run_sph
   call read_data_from_file(filename, bodies, sinks)
 
   ! Start the main simulation loop.
-  call simulate(bodies,sinks)
-
+  if (size(sinks) >= 0) then
+    call simulate(bodies,sinks)
+  end if
 end program run_sph
