@@ -235,11 +235,11 @@ module SPH_routines_module
   ! Loop over the (single) particle provided in the 'body' array slice.
   do i = 1, size(body)
     direction = body(i)%position - node%mass_center ! Vector pointing from particle to the node's center of mass
-    d2 = sum(direction**2)
+    d2 = sum(direction**2) + 0.01*smoothing
     dist = sqrt(d2)  
 
     ! Barnes-Hut criterion:
-    if ((node%size / (dist + 1e-18_dp)) < theta .or. .not. allocated(node%children)) then
+    if ((node%size / (dist)) < theta .or. .not. allocated(node%children)) then
       ! Calculate gravitational acceleration if the node has mass and distance is positive.
       if (node%mass_total > 0.0_dp .and. dist > 0.0_dp) then
         call lookup_grav_kernel(dist, smoothing, W)
@@ -849,19 +849,17 @@ module SPH_routines_module
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
-    real(dp) :: t, dt, end_time, t_list(150)
-    real(dp), allocatable :: v_initial(:,:), pos_initial(:,:), u_initial(:), vis_initial(:)
+    real(dp) :: t, dt, end_time, t_list(500)
     integer :: i, number_bodies , t_test, new_number_bodies
 
     t_test = 0 !variable for checking the save number
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 3_dp ! Set simulation end time.
-    t_list =  (/((i*end_time / 150), i=1, 150)/)
+    end_time = 25_dp ! Set simulation end time.
+    t_list =  (/((i*end_time / 500), i=1, 500)/)
     dt = 1.0e-8_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
     new_number_bodies = number_bodies
     ! Main simulation loop: continue as long as current time is less than end time.
-    allocate(pos_initial(3,number_bodies), u_initial(number_bodies), vis_initial(number_bodies),v_initial(3,number_bodies))
     do while (t < end_time)
       !save check
       if (t > t_list(t_test)) then
@@ -878,18 +876,6 @@ module SPH_routines_module
       
       ! 1. Allocate and initialize the root node for tree building.
       allocate(root)
-
-      !check if allocations have changed
-      !if (number_bodies /= new_number_bodies) allocate(pos_initial(3,number_bodies), u_initial(number_bodies), vis_initial(number_bodies),v_initial(3,number_bodies))
-!
-      !v_initial(1,:) = bodies%velocity(1)
-      !v_initial(2,:) = bodies%velocity(2)
-      !v_initial(3,:) = bodies%velocity(3)
-      !pos_initial(1,:) = bodies%position(1)
-      !pos_initial(2,:) = bodies%position(2)
-      !pos_initial(3,:) = bodies%position(3)
-      !u_initial = bodies%internal_energy
-      !vis_initial = bodies%viscous_parameter
 
       call create_tree(root, bodies, max_depth)
       call get_density(root, bodies)
@@ -921,9 +907,6 @@ module SPH_routines_module
       end do
 
       new_number_bodies = size(bodies)
-
-      !deallocate stuff if any accretion has happened
-      !if (number_bodies /= new_number_bodies) deallocate(pos_initial, u_initial, v_initial,vis_initial)
 
       deallocate(root) 
     end do
