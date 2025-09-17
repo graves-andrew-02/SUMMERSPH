@@ -8,7 +8,7 @@ module SPH_routines_module
                                            ! This determines the resolution of the pre-computed kernel values.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) ! Allocatable arrays to store pre-computed SPH kernel (W)
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 7.5e-3_dp, bounding_size = 150.0_dp
+  real(dp), parameter :: smoothing = 1.25_dp, bounding_size = 200.0_dp
 
   ! Represents a single SPH particle with its physical properties.
   type :: particle
@@ -313,7 +313,6 @@ module SPH_routines_module
       num = node%particles(1)%number
       nr = (body%position - bodies(num)%position) 
       dr = sqrt(sum(nr**2))
-      if (dr <= 1.0e-15) return
       vij = (body%velocity - bodies(num)%velocity)
       vdotr = sum(vij * nr)
 
@@ -546,6 +545,20 @@ module SPH_routines_module
         bodies(j)%acceleration = bodies(j)%acceleration - (sinks(i)%mass * dist_weighting)
       end do
     end do
+
+    if (size(sinks) < 2) return
+
+    !Bit to deal with Sink-Sink Gravity 
+    do i = 1, size(sinks)
+      do j = 1, i-1
+        vect_dr = sinks(j)%position - sinks(i)%position
+        dr = sqrt(sum((vect_dr**2)))
+
+        dist_weighting = G * vect_dr / (dr*dr*dr)
+        sinks(i)%acceleration = sinks(i)%acceleration + (sinks(j)%mass * dist_weighting)
+        sinks(j)%acceleration = sinks(j)%acceleration - (sinks(i)%mass * dist_weighting)
+      end do
+    end do
   end subroutine sink_gravforces
 
   !singular particle version
@@ -656,11 +669,7 @@ module SPH_routines_module
               bodies(num_bodies)%velocity(2) = vy(i)
               bodies(num_bodies)%velocity(3) = vz(i)
               bodies(num_bodies)%internal_energy = energy(i)
-              if (0.015 > x(i) .and. x(i) > -0.015) then
-                bodies(num_bodies)%alpha = 1_dp
-              else
-                bodies(num_bodies)%alpha = 0.1_dp
-              end if
+              bodies(num_bodies)%alpha = 0.1_dp
               bodies(num_bodies)%alpha_rate = 0.0_dp
               bodies(num_bodies)%mass = mass(i)
               bodies(num_bodies)%number = num_bodies
@@ -830,7 +839,7 @@ module SPH_routines_module
       h_candidate(i) = smoothing / sqrt(sum(bodies(i)%velocity*bodies(i)%velocity))
       cfl_candidate(i) = smoothing / (bodies(i)%sound_speed + bodies(i)%sound_speed)
     end do
-    dt_candidate = minval([vel_squared, u_candidate, h_candidate,cfl_candidate]) * 0.4
+    dt_candidate = minval([vel_squared, u_candidate, h_candidate,cfl_candidate]) * 0.1
 
     deallocate(vel_squared, u_candidate, h_candidate, cfl_candidate)
 
@@ -847,13 +856,13 @@ module SPH_routines_module
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
-    real(dp) :: t, dt, end_time, t_list(200)
+    real(dp) :: t, dt, end_time, t_list(500)
     integer :: i, number_bodies , t_test, new_number_bodies
 
     t_test = 0 !variable for checking the save number
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 0.2_dp ! Set simulation end time.
-    t_list =  (/((i*end_time / 200), i=1, 200)/)
+    end_time = 500_dp ! Set simulation end time.
+    t_list =  (/((i*end_time / 500), i=1, 500)/)
     dt = 1.0e-8_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
     new_number_bodies = number_bodies
@@ -898,7 +907,7 @@ module SPH_routines_module
       call get_next_timestep(bodies, dt)
 
       ! Sink accretion and boundary check
-      !call initiate_sink_accretion(sinks, bodies, root)
+      call initiate_sink_accretion(sinks, bodies, root)
 
       do i = 1, size(bodies)
         bodies(i)%number = i
@@ -922,7 +931,7 @@ program run_sph
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  filename = 'sod_ic_smaller.txt'
+  filename = 'disc_5000_with_flyby.txt'
   !read *, filename
   call read_data_from_file(filename, bodies, sinks)
 
