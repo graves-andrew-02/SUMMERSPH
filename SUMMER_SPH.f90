@@ -425,13 +425,26 @@ module SPH_routines_module
   end subroutine
   
 !------------------Sink and particle deletion subroutines-----------------
+  subroutine check_bounds(bodies)
+    implicit none
+    type(particle), allocatable, intent(inout) :: bodies(:)
+    logical :: keep_mask(size(bodies))
+    integer :: i
+
+    ! Create logical mask: .TRUE. for bodies inside bounding box
+    keep_mask = [(all(abs(bodies(i)%position) <= bounding_size), i = 1, size(bodies))]
+
+    ! Filter and assign
+    bodies = pack(bodies, keep_mask)
+  end subroutine check_bounds
+
   subroutine initiate_sink_accretion(sinks, bodies, root)
     implicit none
     type(sink), intent(inout) :: sinks(:)
     type(particle), intent(inout), allocatable :: bodies(:)
     type(branch), intent(in) :: root
     real(dp) :: new_mass
-    logical :: keep_mask(size(sinks)+1, size(bodies))
+    logical :: keep_mask(size(sinks), size(bodies))
     integer :: i, j
 
     !###########IDENTIFY ACCRETABLE PARTICLES##############
@@ -455,9 +468,6 @@ module SPH_routines_module
     end do
 
     !###########PACK AND UPDATE SINK####################
-    ! Create logical mask: .TRUE. for bodies inside bounding box
-    keep_mask(size(sinks)+1,:) = [(all(abs(bodies(j)%position) <= bounding_size), j = 1, size(bodies))] ! .true. if inside bounds, .false. if outside
-
     call pack_sinks(bodies, keep_mask)
   end subroutine initiate_sink_accretion
 
@@ -865,6 +875,7 @@ module SPH_routines_module
 
       ! Sink accretion and boundary check
       if (any(sinks%mass > 0.0_dp)) call initiate_sink_accretion(sinks, bodies, root)
+      call check_bounds(bodies)
 
       do i = 1, size(bodies)
         bodies(i)%number = i
