@@ -15,15 +15,13 @@ Thin ring evolution:
 
 https://github.com/user-attachments/assets/df89fe05-3852-4479-b3c9-319c9d578eed
 
-NOTFINISHED!!!
 1D Sod Shock tube:
 
-<img width="578" height="455" alt="sod1" src="https://github.com/user-attachments/assets/a57a495a-29a7-47d2-b21f-798f7c84c0db" />
-<img width="578" height="455" alt="sod2" src="https://github.com/user-attachments/assets/db95a8ff-2e0b-45c5-92c1-addce9fcc096" />
-<img width="578" height="455" alt="sod3" src="https://github.com/user-attachments/assets/7f953dd7-1015-4f3f-8814-8fb71524dfa5" />
+<img width="989" height="790" alt="Shock tube graphs" src="https://github.com/user-attachments/assets/eebe7309-01da-4f9e-b74c-2f60ed991528" />
 
+Uniform Keplerian disc at 100yrs:
 
-
+<img width="600" height="436" alt="disc at 100yr" src="https://github.com/user-attachments/assets/d4ac6eba-aede-492f-ab74-125e11c5b9a0" />
 
 
 # How to run
@@ -31,4 +29,6 @@ NOTFINISHED!!!
    just change this to the name of the .txt initial conditions file you choose.
 2. The file should have columns for the [x, y, z, vx, vy, vz, internal energy per unit mass, mass] of all particles including sinks.
 3. Any line with the internal energy zeroed will be read as a sink particle.
-4. I will add the need of a parameters file, as of now the code uses AU, M_sun, year units (4pi^2 = G) and the end time can be adjusted in the 
+4. I will add the need of a parameters file, as of now the code uses AU, M_sun, year units (4pi^2 = G) and the end time can be adjusted in the "simulate" subroutine.
+5. compile with gfortran via the terminal line "gfortran '.\SUMMER_SPH.f90' -o run_sph"
+6. run either via the .exe or again in terminal via ".\run_sph"
