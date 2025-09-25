@@ -7,7 +7,7 @@ module SPH_routines_module
   integer, parameter :: nq = 5000, max_depth = 1000          !Number of samples for the SPH kernel lookup tables.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) !Allocatable arrays to store pre-computed SPH kernel
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 10_dp, bounding_size = 200.0_dp
+  real(dp), parameter :: smoothing = 10_dp, bounding_size = 1500.0_dp
 
   !Represents a single SPH particle with its physical properties.
   type :: particle
@@ -557,7 +557,7 @@ module SPH_routines_module
       ! Variables
       integer :: status, num_lines, i, num_bodies, num_sinks
       character(len=256) :: header_line
-      real(kind=8), allocatable :: x(:), y(:), z(:), vx(:), vy(:), vz(:), energy(:), mass(:)
+      real(kind=8), allocatable :: x(:), y(:), z(:), vx(:), vy(:), vz(:), energy(:), mass(:), alpha(:)
       type(particle), allocatable, intent(inout) :: bodies(:)
       type(sink), allocatable, intent(inout) :: sinks(:)
 
@@ -589,7 +589,7 @@ module SPH_routines_module
       ! -----------------------
       allocate(x(num_lines), y(num_lines), z(num_lines), &
                vx(num_lines), vy(num_lines), vz(num_lines), &
-               energy(num_lines), mass(num_lines), stat=status)
+               energy(num_lines), mass(num_lines), alpha(num_lines), stat=status)
       if (status /= 0) then
           write(*,*) 'Error allocating memory for arrays.'
           return
@@ -601,7 +601,7 @@ module SPH_routines_module
       open(unit=10, file=filename, status='old', action='read', iostat=status)
       read(10, '(A)', iostat=status) header_line  ! skip header again
       do i = 1, num_lines
-          read(10, *, iostat=status) x(i), y(i), z(i), vx(i), vy(i), vz(i), energy(i), mass(i)
+          read(10, *, iostat=status) x(i), y(i), z(i), vx(i), vy(i), vz(i), energy(i), mass(i), alpha(i)
           if (status /= 0) then
               write(*,*) 'Error reading line ', i
               exit
@@ -635,7 +635,7 @@ module SPH_routines_module
               bodies(num_bodies)%velocity(2) = vy(i)
               bodies(num_bodies)%velocity(3) = vz(i)
               bodies(num_bodies)%internal_energy = energy(i)
-              bodies(num_bodies)%alpha = 0.1_dp
+              bodies(num_bodies)%alpha = alpha(i)
               bodies(num_bodies)%alpha_rate = 0.0_dp
               bodies(num_bodies)%mass = mass(i)
               bodies(num_bodies)%number = num_bodies
@@ -666,7 +666,7 @@ module SPH_routines_module
       ! -----------------------
       ! Clean up
       ! -----------------------
-      deallocate(x, y, z, vx, vy, vz, energy, mass)
+      deallocate(x, y, z, vx, vy, vz, energy, mass, alpha)
 
       write(*,*) 'Successfully read ', size(bodies), ' bodies and ', size(sinks), ' sinks from ', trim(filename), '.'
 
@@ -829,7 +829,7 @@ module SPH_routines_module
     t = 0.0_dp         ! Initialize simulation time.
     end_time = 150_dp ! Set simulation end time.
     t_list =  (/((i*end_time / 150), i=1, 150)/)
-    dt = 1.0e-4_dp          ! Set time step size.
+    dt = 1.0e-2_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
     new_number_bodies = number_bodies
     ! Main simulation loop: continue as long as current time is less than end time.
@@ -899,7 +899,7 @@ program run_sph
   call init_kernel_table()
   call init_grav_kernel_table()
 
-  filename = 'Collapse.txt'
+  filename = 'save149.txt'
   !read *, filename
   call read_data_from_file(filename, bodies, sinks)
 
