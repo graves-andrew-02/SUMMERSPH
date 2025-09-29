@@ -25,14 +25,15 @@ vz = np.zeros(N_particles)
 
 energy = 0.25 * np.ones(N_particles)
 mass = np.full(N_particles, mass_particle)
+alpha = np.full(N_particles, 0.1)
 
 # Create DataFrame and save
 df = pd.DataFrame({
     'x': x, 'y': y, 'z': z,
     'vx': vx, 'vy': vy, 'vz': vz,
     'energy': energy,
-    #'sph_mass': sph_mass,
-    'mass': mass
+    'mass': mass,
+    'alpha': alpha
 })
 
 # Save to file
