@@ -1,17 +1,16 @@
 # SUMMERSPH - Overview
 
-This is a Summer Project because I am very, very bored, and it might be cool.
+This is a Summer Project because I am very, very bored, and want to look at circumstellar discs.
 
 # Goals:
 1. make an sph code that doesnt completely suck and runs on a laptop
-
-Thats about it really, this is made with me in mind, so might be complete crap.
-
-
+2. speed up nearest neighbour searching and gravitational interactions with a barnes-hut tree.
+3. include artificial viscosity.
+4. make some pretty pictures and do some science
 
 Here's a couple of videos of what has been done so far
 
-Thin ring evolution:
+Thin ring evolution: (old version)
 
 https://github.com/user-attachments/assets/df89fe05-3852-4479-b3c9-319c9d578eed
 
