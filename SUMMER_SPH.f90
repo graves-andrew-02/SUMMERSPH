@@ -876,13 +876,6 @@ module SPH_routines_module
       ! Sink accretion and boundary check
       if (any(sinks%mass > 0.0_dp)) call initiate_sink_accretion(sinks, bodies, root)
       call check_bounds(bodies)
-
-      do i = 1, size(bodies)
-        bodies(i)%number = i
-      end do
-
-      new_number_bodies = size(bodies)
-
       deallocate(root) 
     end do
   end subroutine simulate
@@ -908,3 +901,4 @@ program run_sph
     call simulate(bodies,sinks)
   end if
 end program run_sph
+
