@@ -1,5 +1,6 @@
 module SPH_routines_module
   use, intrinsic :: ieee_arithmetic
+  USE OMP_LIB
   implicit none
   !Global Parameters:
   integer, parameter :: dp = kind(1.0d0)
@@ -7,7 +8,7 @@ module SPH_routines_module
   integer, parameter :: nq = 5000, max_depth = 1000          !Number of samples for the SPH kernel lookup tables.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) !Allocatable arrays to store pre-computed SPH kernel
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 10_dp, bounding_size = 1500.0_dp
+  real(dp), parameter :: smoothing = 2.5_dp, bounding_size = 1500.0_dp
 
   !Represents a single SPH particle with its physical properties.
   type :: particle
@@ -79,9 +80,9 @@ module SPH_routines_module
 
   subroutine init_grav_kernel_table()
     integer :: i
-    real(dp) :: q      ! Normalized distance, ranging from 0 to 2
+    real(dp) :: q      
 
-    ! Allocate memory for the kernel and derivative tables
+    !Allocate memory for the kernel and derivative tables
     allocate(grav_table(0:nq))
 
     do i = 0, nq
@@ -148,110 +149,145 @@ module SPH_routines_module
   recursive subroutine build_tree(node, depth, max_particles)
     implicit none
     type(branch), intent(inout) :: node
-    integer, intent(in) :: depth, max_particles ! Input: current recursion depth, max particles allowed in a leaf node.
-    integer :: i, j, n                        ! Loop indices and temporary size variable
-    real(dp), dimension(3) :: offset         ! Spatial offset for calculating child node centers
-    type(Particle), allocatable :: child_particles(:)
+    integer, intent(in) :: depth, max_particles
+  
+    integer :: i, j, p, np
+    real(dp), dimension(3) :: offset
     integer :: child_index
-    integer :: p
-
-    node%mass_total = 0.0_dp
+  
+    ! For optimized particle distribution
+    integer :: counts(8), write_pos(8)
+    integer, allocatable :: which_child(:)
+  
+    !-----------------------------
+    ! Compute mass and center-of-mass for this node
+    !-----------------------------
+    node%mass_total  = 0.0_dp
     node%mass_center = 0.0_dp
+  
     do i = 1, size(node%particles)
-      node%mass_total = node%mass_total + node%particles(i)%mass
+      node%mass_total  = node%mass_total  + node%particles(i)%mass
       node%mass_center = node%mass_center + node%particles(i)%mass * node%particles(i)%position
     end do
+  
     if (node%mass_total > 0.0_dp) then
       node%mass_center = node%mass_center / node%mass_total
     else
       node%mass_center = node%center
     end if
-
-    ! Base case for recursion:
-    ! If the number of particles in the node is less than or equal to `max_particles` (making it a leaf node),
-    ! OR if the maximum recursion `depth` has been reached, stop subdividing.
+  
+    !-----------------------------
+    ! Base case: leaf node or max depth reached
+    !-----------------------------
     if (size(node%particles) <= max_particles .or. depth == 0) return
-    ! If not a base case, allocate 8 child nodes for this branch.
+  
+    !-----------------------------
+    ! Allocate and initialize 8 child nodes
+    ! (Do NOT allocate empty particle arrays yet; allocate only if needed.)
+    !-----------------------------
     allocate(node%children(8))
+  
     do i = 1, 8
-      node%children(i)%size = node%size / 2.0_dp
-      node%children(i)%n_particles = 0           !Initialize particle count for child to zero
-      allocate(node%children(i)%particles(0))    !Allocate an empty array for particles in the child node
-      node%children(i)%center = node%center      !Start with parent's center for calculating child's center
-
-      do j = 1, 3
-        if (btest(i - 1, j - 1)) then ! If j-th bit is set (for x, y, or z)
-          offset(j) = 0.25_dp * node%size ! Positive offset for this dimension
-        else
-          offset(j) = -0.25_dp * node%size ! Negative offset for this dimension
-        end if
-      end do
-      node%children(i)%center = node%center + offset ! Set the child's actual center
+      node%children(i)%size = node%size * 0.5_dp
+      node%children(i)%n_particles = 0
+    
+      ! Compute child center offsets from bits of (i-1)
+      offset(1) = merge( 0.25_dp * node%size, -0.25_dp * node%size, btest(i-1, 0) )
+      offset(2) = merge( 0.25_dp * node%size, -0.25_dp * node%size, btest(i-1, 1) )
+      offset(3) = merge( 0.25_dp * node%size, -0.25_dp * node%size, btest(i-1, 2) )
+    
+      node%children(i)%center = node%center + offset
+      ! Leave node%children(i)%particles unallocated for now
     end do
-
-    ! Distribute particles from the current node to its newly created children.
-    do p = 1, size(node%particles)
-      child_index = 1 ! Initialize child index (corresponds to octant 1)
-      ! Determine which child octant the current particle `node%particles(p)` belongs to.
+  
+    np = size(node%particles)
+    allocate(which_child(np))
+    counts = 0
+  
+    ! Pass 1: determine destination child for each particle and count
+    do p = 1, np
+      child_index = 1
       do j = 1, 3
         if (node%particles(p)%position(j) > node%center(j)) then
           child_index = ibset(child_index - 1, j - 1) + 1
         end if
       end do
-
-      ! Add the particle to the selected child node's particle list.
-      n = size(node%children(child_index)%particles) ! Current number of particles in the target child
-      ! `move_alloc` is used for efficient reallocation of arrays, preventing full data copy.
-      call move_alloc(node%children(child_index)%particles, child_particles)
-      allocate(node%children(child_index)%particles(n + 1)) ! Allocate space for one more particle
-      if (n > 0) node%children(child_index)%particles(1:n) = child_particles ! Copy existing particles back
-      node%children(child_index)%particles(n + 1) = node%particles(p) ! Add the new particle
-      node%children(child_index)%n_particles = node%children(child_index)%n_particles + 1 ! Increment child's particle count
+      which_child(p) = child_index
+      counts(child_index) = counts(child_index) + 1
     end do
-
-    ! Recursively call build_tree for each child node that contains particles.
+  
+    ! Allocate each child's particle array exactly once (only if non-empty)
+    do i = 1, 8
+      node%children(i)%n_particles = counts(i)
+      if (counts(i) > 0) then
+        allocate(node%children(i)%particles(counts(i)))
+      end if
+    end do
+  
+    ! Pass 2: fill child arrays
+    write_pos = 0
+    do p = 1, np
+      child_index = which_child(p)
+      write_pos(child_index) = write_pos(child_index) + 1
+      node%children(child_index)%particles(write_pos(child_index)) = node%particles(p)
+    end do
+  
+    deallocate(which_child)
+  
+    !-----------------------------
+    ! Recurse into non-empty children
+    !-----------------------------
     do i = 1, 8
       if (node%children(i)%n_particles > 0) then
         call build_tree(node%children(i), depth - 1, max_particles)
       end if
     end do
+  
   end subroutine build_tree
 
-  ! Recursive Subroutine: navigate_tree
-  ! Traverses the octree to calculate the gravitational acceleration on a given 'body' particle
-  ! using the Barnes-Hut approximation.
-  recursive subroutine particle_gravforces(node, body, theta)
-  implicit none
-  type(branch), intent(in) :: node
-  type(particle), intent(inout) :: body(:)
-  real(dp), intent(in) :: theta
-  real(dp) :: dist, d2, W
-  real(dp), dimension(3) :: direction
-  integer :: i, k
 
-  ! Loop over the (single) particle provided in the 'body' array slice.
-  do i = 1, size(body)
-    direction = body(i)%position - node%mass_center ! Vector pointing from particle to the node's center of mass
-    d2 = sum(direction**2) + 0.001*smoothing
-    dist = sqrt(d2)  
+  subroutine particle_gravforces(node, body, theta)
+    use omp_lib
+    implicit none
+    type(branch),   intent(in)    :: node
+    type(particle), intent(inout) :: body(:)
+    real(dp),       intent(in)    :: theta
+    integer :: i
 
-    ! Barnes-Hut criterion:
-    if ((node%size / (dist)) < theta .or. .not. allocated(node%children)) then
-      ! Calculate gravitational acceleration if the node has mass and distance is positive.
+    !$omp parallel do default(none) shared(node, body, theta) private(i) schedule(static)
+    do i = 1, size(body)
+      call particle_gravforce_one(node, body(i), theta)
+    end do
+    !$omp end parallel do
+  end subroutine particle_gravforces
+
+  recursive subroutine particle_gravforce_one(node, p, theta)
+    implicit none
+    type(branch),   intent(in)    :: node
+    type(particle), intent(inout) :: p
+    real(dp),       intent(in)    :: theta
+
+    real(dp) :: dist, d2, W
+    real(dp), dimension(3) :: direction
+    integer :: k
+
+    direction = p%position - node%mass_center
+    d2   = sum(direction**2) + 0.001_dp*smoothing
+    dist = sqrt(d2)
+
+    if ((node%size / dist) < theta .or. .not. allocated(node%children)) then
       if (node%mass_total > 0.0_dp .and. dist > 0.0_dp) then
         call lookup_grav_kernel(dist, smoothing, W)
-        body(i)%acceleration = body(i)%acceleration - (G * node%mass_total * W *direction / (dist**3))
+        p%acceleration = p%acceleration - (G * node%mass_total * W * direction / (dist**3))
       end if
-    else if (allocated(node%children)) then
-      ! If the criterion is not met and the node has children, recurse into each child node.
+    else
       do k = 1, size(node%children)
         if (node%children(k)%n_particles > 0) then
-          call particle_gravforces(node%children(k), body(i:i), theta) ! Recurse, passing the same particle
+          call particle_gravforce_one(node%children(k), p, theta)
         end if
       end do
     end if
-  end do
-  end subroutine particle_gravforces
+  end subroutine particle_gravforce_one
 
 !--------------------------SPH and Density finding subroutines---------------------------------
 
@@ -261,12 +297,20 @@ module SPH_routines_module
     type(branch), intent(in) :: root           ! The root node of the octree.
     type(particle), intent(inout) :: body(:)  ! Array of all particles in the simulation.
 
-    integer :: i
+    integer :: i, j
 
-    ! Loop through each particle in the main `body` array.
+    !$OMP PARALLEL do default(none) shared(root, body) private(i,j) schedule(guided)
+
+    !loop through each particle
     do i = 1, size(body)
-      call SPH_tree_search(root, body(i), body)
+      !could be parallel?
+      !OMP DO
+      do j = 1, size(root%children)
+        call SPH_tree_search(root%children(j), body(i), body)
+      end do
     end do
+
+    !$OMP END PARALLEL do
 
     !clean up the alpha rates
     do i = 1, size(body)
@@ -289,7 +333,6 @@ module SPH_routines_module
     ! Calculate vector from the 'body' particle's position to the current node's center.
     over_dr = (body%position - node%center)
 
-    ! Recursion condition:
     ! If the node contains multiple particles AND the 'body' particle's smoothing sphere
     ! potentially overlaps this node's bounding box (indicated by `abs(over_dr) < (2*smoothing + node%size/2)`),
     ! AND the node has children, then recurse into its children.
@@ -317,7 +360,7 @@ module SPH_routines_module
 
       if (vdotr >= 0) vdotr = 0.0_dp
 
-      nr = nr / dr ! Normalize the separation vector
+      nr = nr / dr ! Normalize the separation
 
       ! Lookup kernel (W) and derivative (dW/dr) values for the calculated distance 'dr'.
       call lookup_kernel(dr, smoothing, Wj, dWj_mag)
@@ -340,7 +383,7 @@ module SPH_routines_module
       body%acceleration = body%acceleration - bodies(num)%mass * acc_contrib
       bodies(num)%acceleration = bodies(num)%acceleration + body%mass *acc_contrib
 
-      ! Accumulate rate of change in internal energy:
+      !Accumulate rate of change in internal energy: CURRENTLY SET TO ADIABATIC
       body%internal_energy_rate = body%internal_energy_rate + bodies(num)%mass * vdotgradW *((body%pressure/(body%density * body%density)) + 0.5*viscous_cont)
       bodies(num)%internal_energy_rate = bodies(num)%internal_energy_rate + body%mass * vdotgradW *((bodies(num)%pressure/(bodies(num)%density * bodies(num)%density)) + 0.5*viscous_cont)
 
@@ -348,7 +391,7 @@ module SPH_routines_module
       bodies(num)%alpha_rate = bodies(num)%alpha_rate + body%mass * vdotgradW
       return 
     end if
-    ! If neither recursion nor leaf node interaction conditions are met, simply return.
+    !If neither recursion nor leaf node interaction conditions are met return.
   end subroutine SPH_tree_search
 
   ! Subroutine: get_density
@@ -601,7 +644,7 @@ module SPH_routines_module
       open(unit=10, file=filename, status='old', action='read', iostat=status)
       read(10, '(A)', iostat=status) header_line  ! skip header again
       do i = 1, num_lines
-          read(10, *, iostat=status) x(i), y(i), z(i), vx(i), vy(i), vz(i), energy(i), mass(i), alpha(i)
+          read(10, *, iostat=status) x(i), y(i), z(i), vx(i), vy(i), vz(i), energy(i), mass(i)!, alpha(i)
           if (status /= 0) then
               write(*,*) 'Error reading line ', i
               exit
@@ -635,7 +678,7 @@ module SPH_routines_module
               bodies(num_bodies)%velocity(2) = vy(i)
               bodies(num_bodies)%velocity(3) = vz(i)
               bodies(num_bodies)%internal_energy = energy(i)
-              bodies(num_bodies)%alpha = alpha(i)
+              bodies(num_bodies)%alpha = 0.0_dp!alpha(i)  !Change to allow reading from saves
               bodies(num_bodies)%alpha_rate = 0.0_dp
               bodies(num_bodies)%mass = mass(i)
               bodies(num_bodies)%number = num_bodies
@@ -648,18 +691,18 @@ module SPH_routines_module
               sinks(num_sinks)%velocity(2) = vy(i)
               sinks(num_sinks)%velocity(3) = vz(i)
               sinks(num_sinks)%mass = mass(i)
-              sinks(num_sinks)%radius = 1_dp
+              sinks(num_sinks)%radius = 3.5_dp
           end if
       end do
 
       if (num_sinks == 0) then
-        sinks(1)%position(1) = 0
-        sinks(1)%position(2) = 0
-        sinks(1)%position(3) = 0
-        sinks(1)%velocity(1) = 0
-        sinks(1)%velocity(2) = 0
-        sinks(1)%velocity(3) = 0
-        sinks(1)%mass = 0
+        sinks(1)%position(1) = 0.0_dp
+        sinks(1)%position(2) = 0.0_dp
+        sinks(1)%position(3) = 0.0_dp
+        sinks(1)%velocity(1) = 0.0_dp
+        sinks(1)%velocity(2) = 0.0_dp
+        sinks(1)%velocity(3) = 0.0_dp
+        sinks(1)%mass = 0.0_dp
         sinks(1)%radius = 0.0_dp
       end if
 
@@ -805,13 +848,13 @@ module SPH_routines_module
       h_candidate(i) = smoothing / sqrt(sum(bodies(i)%velocity*bodies(i)%velocity))
       cfl_candidate(i) = smoothing / (bodies(i)%sound_speed + 1.2_dp * bodies(i)%sound_speed)
     end do
-    dt_candidate = minval([vel_squared, u_candidate, h_candidate,cfl_candidate]) * 0.1
+    dt_candidate = minval([vel_squared, u_candidate, h_candidate,cfl_candidate]) * 0.25
 
     deallocate(vel_squared, u_candidate, h_candidate, cfl_candidate)
 
     if (dt_candidate > 2*dt .and. 1.5 * dt < 0.1) then
       dt = 1.5 * dt
-    else if (dt_candidate < 0.5 * dt .and. dt * 0.5 > 0.00000001) then
+    else if (dt_candidate < 0.5 * dt .and. dt * 0.5 > 0.0001) then
       dt = 0.5 * dt
     end if
   end subroutine get_next_timestep
@@ -822,13 +865,13 @@ module SPH_routines_module
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
-    real(dp) :: t, dt, end_time, t_list(150)
+    real(dp) :: t, dt, end_time, t_list(1000)
     integer :: i, number_bodies , t_test, new_number_bodies
 
     t_test = 0 !variable for checking the save number
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 150_dp ! Set simulation end time.
-    t_list =  (/((i*end_time / 150), i=1, 150)/)
+    end_time = 1000_dp ! Set simulation end time.
+    t_list =  (/((i*end_time / 1000), i=1, 1000)/)
     dt = 1.0e-2_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
     new_number_bodies = number_bodies
@@ -854,10 +897,9 @@ module SPH_routines_module
       call get_pressure_and_sound_speed(bodies)
       call find_forces(root, bodies, sinks)
 
-
       call kick(bodies, sinks, dt)
       deallocate(root)
-
+      
       call drift(bodies, sinks, dt)
 
       allocate(root)
@@ -876,6 +918,13 @@ module SPH_routines_module
       ! Sink accretion and boundary check
       if (any(sinks%mass > 0.0_dp)) call initiate_sink_accretion(sinks, bodies, root)
       call check_bounds(bodies)
+
+      !do i = 1, size(bodies)
+      !  bodies(i)%number = i
+      !end do
+
+      !new_number_bodies = size(bodies)
+
       deallocate(root) 
     end do
   end subroutine simulate
@@ -891,8 +940,10 @@ program run_sph
   ! Initialize the SPH kernel lookup tables (W and dW/dr). This needs to be done once at the start.
   call init_kernel_table()
   call init_grav_kernel_table()
+  !call omp_set_dynamic(.true.)
+  !print *, "Using", omp_get_max_threads(), "threads"
 
-  filename = 'save149.txt'
+  filename = 'disc_12000_2.txt'
   !read *, filename
   call read_data_from_file(filename, bodies, sinks)
 
@@ -900,5 +951,5 @@ program run_sph
   if (size(sinks) >= 0) then
     call simulate(bodies,sinks)
   end if
+  
 end program run_sph
-
