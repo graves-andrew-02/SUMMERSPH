@@ -4,11 +4,11 @@ module SPH_routines_module
   implicit none
   !Global Parameters:
   integer, parameter :: dp = kind(1.0d0)
-  real(dp), parameter :: G = 39.47841760435743, pi = 3.14159265359 !AU^3/(Msun*yr^2) Gravitational constant (in SI units)
-  integer, parameter :: nq = 2500, max_depth = 1000  !Number of samples for the SPH kernel lookup tables.
+  real(dp), parameter :: G = 39.47841760435743, pi = 3.1415926535897932 !AU^3/(Msun*yr^2) Gravitational constant (in SI units)
+  integer, parameter :: nq = 2500  !Number of samples for the SPH kernel lookup tables.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) !Allocatable arrays to store pre-computed SPH kernel
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 2.5_dp, bounding_size = 200.0_dp
+  real(dp), parameter :: smoothing = 2.5_dp
 
   !Represents a single SPH particle with its physical properties.
   type :: particle
@@ -48,16 +48,27 @@ module SPH_routines_module
     real(dp) :: mass_total
     real(dp) :: max_len
     real(dp), dimension(3) :: mass_center 
-    type(branch), allocatable :: children(:) ! Array of 8 child branches
+    type(branch), allocatable :: children(:)
   end type branch
+
+  type :: param
+    real(dp) :: bounding_size
+    integer :: max_depth
+    real(dp) :: theta
+    real(dp) :: gamma
+    real(dp) :: eta
+    real(dp) :: convergence_criteria
+    real(dp) :: max_length
+    real(dp) :: timestep_scale
+    real(dp) :: end_time
+  end type param
   contains
 
 !---------------------------Kernel Tables and Lookup routines-----------------------------
-  ! Initializes the global lookup tables (w_table and dw_table) for the SPH kernel
-  ! and its derivative.
+  ! Initializes the global lookup tables
   subroutine init_kernel_table()
     integer :: i
-    real(dp) :: q      ! Normalized distance, ranging from 0 to 2
+    real(dp) :: q
 
     ! Allocate memory for the kernel and derivative tables
     allocate(w_table(0:nq))
@@ -488,28 +499,28 @@ module SPH_routines_module
 
 
 
-  subroutine get_pressure_and_sound_speed(bodies)
+  subroutine get_pressure_and_sound_speed(bodies, gamma)
     implicit none
     type(particle), intent(inout)  :: bodies(:)
+    real(dp), intent(in) :: gamma
     integer :: i
 
     do i = 1, size(bodies)
-      bodies(i)%pressure = (0.4_dp) * bodies(i)%internal_energy * bodies(i)%density
-      bodies(i)%sound_speed = sqrt(1.4_dp*bodies(i)%pressure/bodies(i)%density)
+      bodies(i)%pressure = (gamma - 1.0_dp) * bodies(i)%internal_energy * bodies(i)%density
+      bodies(i)%sound_speed = sqrt(gamma*bodies(i)%pressure/bodies(i)%density)
     end do
   end subroutine
   
 
-  subroutine calc_smoothing(root,bodies)
+  subroutine calc_smoothing(root,bodies, eta, convergence_criteria, max_length)
     implicit none
     type(branch), intent(inout) :: root
     type(particle), intent(inout) :: bodies(:)
-    real(dp) :: old_len, eta, convergence_criteria, max_length
+    real(dp) :: old_len
+    real(dp), intent(in) :: eta, convergence_criteria, max_length
     integer :: i
 
-    eta = 1.2_dp
-    convergence_criteria = 0.001_dp
-    max_length = 7.0_dp
+
     !$OMP PARALLEL do default(none) shared(root, bodies, convergence_criteria, max_length, eta) private(i, old_len) schedule(guided)
     do i = 1, size(bodies)
       old_len = bodies(i)%s_length
@@ -535,9 +546,10 @@ module SPH_routines_module
   end subroutine calc_smoothing
 
 !------------------Sink and particle deletion subroutines-----------------
-  subroutine check_bounds(bodies)
+  subroutine check_bounds(bodies, bounding_size)
     implicit none
     type(particle), allocatable, intent(inout) :: bodies(:)
+    real(dp), intent(in) :: bounding_size
     logical :: keep_mask(size(bodies))
     integer :: i
 
@@ -750,7 +762,7 @@ module SPH_routines_module
               bodies(num_bodies)%internal_energy = energy(i)
               bodies(num_bodies)%alpha = 0.0_dp!alpha(i)  !Change to allow reading from saves
               bodies(num_bodies)%alpha_rate = 0.0_dp
-              bodies(num_bodies)%s_length = 2.5_dp
+              bodies(num_bodies)%s_length = 4.5_dp
               bodies(num_bodies)%mass = mass(i)
               bodies(num_bodies)%number = num_bodies
           else
@@ -776,7 +788,7 @@ module SPH_routines_module
         sinks(1)%mass = 0.0_dp
         sinks(1)%radius = 0.0_dp
       end if
-
+      
       ! -----------------------
       ! Clean up
       ! -----------------------
@@ -786,6 +798,72 @@ module SPH_routines_module
 
   end subroutine read_data_from_file
   
+  subroutine read_params_from_file(filename, params)
+      implicit none
+      character(len=*), intent(in) :: filename
+      type(param), intent(inout) :: params
+
+
+      ! Variables
+      integer :: status, num_lines, i
+      character(len=256) :: header_line
+      real(dp) :: bounding_size
+      integer  :: max_depth
+      real(dp) :: theta
+      real(dp) :: gamma
+      real(dp) :: eta
+      real(dp) :: convergence_criteria
+      real(dp) :: max_length
+      real(dp) :: timestep_scale
+      real(dp) :: end_time
+      ! -----------------------
+      ! First pass: count lines
+      ! -----------------------
+      num_lines = 0
+      open(unit=10, file=filename, status='old', action='read', iostat=status)
+      if (status /= 0) then
+          write(*,*) 'Error opening file: ', trim(filename)
+          return
+      end if
+
+      read(10, '(A)', iostat=status) header_line   ! skip header
+      do
+          read(10, *, iostat=status) 
+          if (status /= 0) exit
+          num_lines = num_lines + 1
+      end do
+      close(10)
+
+      if (num_lines == 0) then
+          write(*,*) 'No data found in file: ', trim(filename)
+          return
+      end if
+
+
+      open(unit=10, file=filename, status='old', action='read', iostat=status)
+      read(10, '(A)', iostat=status) header_line  ! skip header again
+      do i = 1, num_lines
+          read(10, *, iostat=status) bounding_size, max_depth, theta, gamma, eta, convergence_criteria, max_length, timestep_scale, end_time
+          if (status /= 0) then
+              write(*,*) 'Error reading line ', i
+              exit
+          end if
+      end do
+      close(10)
+
+      params%bounding_size       = bounding_size       
+      params%max_depth           = max_depth           
+      params%theta               = theta               
+      params%gamma               = gamma               
+      params%eta                 = eta                 
+      params%convergence_criteria= convergence_criteria
+      params%max_length          = max_length          
+      params%timestep_scale      = timestep_scale 
+      params%end_time            = end_time
+
+      write(*,*) 'Successfully read parameters from', trim(filename), '.'
+
+  end subroutine read_params_from_file
 
   subroutine make_save(bodies, sinks ,number)
     implicit none
@@ -901,13 +979,14 @@ module SPH_routines_module
    
   end subroutine find_forces
 
-  subroutine get_next_timestep(bodies, dt)
+  subroutine get_next_timestep(bodies, dt, timestep_scale)
     implicit none
     integer :: i, number_bodies
     real(dp), intent(inout) :: dt
     type(particle), intent(in) :: bodies(:)
     real(dp), allocatable :: vel_squared(:), u_candidate(:), h_candidate(:), cfl_candidate(:)
     real(dp) :: dt_candidate
+    real(dp), intent(in) :: timestep_scale
 
     number_bodies = size(bodies)
     allocate(vel_squared(number_bodies)) !from grav
@@ -921,7 +1000,7 @@ module SPH_routines_module
       h_candidate(i) = bodies(i)%s_length / sqrt(sum(bodies(i)%velocity*bodies(i)%velocity))
       cfl_candidate(i) = bodies(i)%s_length / (bodies(i)%sound_speed + 1.2_dp * bodies(i)%sound_speed)
     end do
-    dt_candidate = minval([vel_squared, u_candidate, h_candidate,cfl_candidate]) * 0.25
+    dt_candidate = minval([vel_squared, u_candidate, h_candidate,cfl_candidate]) * timestep_scale
 
     deallocate(vel_squared, u_candidate, h_candidate, cfl_candidate)
 
@@ -933,17 +1012,38 @@ module SPH_routines_module
   end subroutine get_next_timestep
 
 !-----------------------Simulation Loop Subroutine---------------------------
-  subroutine simulate(bodies, sinks)
+  subroutine simulate(bodies, sinks, params)
     implicit none
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
     type(sink), intent(inout) :: sinks(:)
-    real(dp) :: t, dt, end_time, t_list(1000)
+    type(param), intent(in) :: params
+    real(dp) :: t, dt, t_list(1000)
     integer :: i, number_bodies , t_test, new_number_bodies
+    !parameters for the sim
+    real(dp) :: bounding_size       
+    integer :: max_depth           
+    real(dp) :: theta               
+    real(dp) :: gamma               
+    real(dp) :: eta                 
+    real(dp) :: convergence_criteria
+    real(dp) :: max_length          
+    real(dp) :: timestep_scale
+    real(dp) :: end_time
 
+    bounding_size       = params%bounding_size       
+    max_depth           = params%max_depth           
+    theta               = params%theta               
+    gamma               = params%gamma               
+    eta                 = params%eta                 
+    convergence_criteria= params%convergence_criteria
+    max_length          = params%max_length  
+    timestep_scale      = params%timestep_scale 
+    end_time            = params%end_time      
+    
+    
     t_test = 0 !variable for checking the save number
     t = 0.0_dp         ! Initialize simulation time.
-    end_time = 1000_dp ! Set simulation end time.
     t_list =  (/((i*end_time / 1000), i=1, 1000)/)
     dt = 5.0e-5_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
@@ -967,7 +1067,7 @@ module SPH_routines_module
       allocate(root)
       call create_tree(root, bodies, max_depth)
       call get_density(root, bodies)
-      call get_pressure_and_sound_speed(bodies)
+      call get_pressure_and_sound_speed(bodies, gamma)
       call find_forces(root, bodies, sinks)
 
       call kick(bodies, sinks, dt)
@@ -979,20 +1079,20 @@ module SPH_routines_module
       call create_tree(root, bodies, max_depth)
 
       call get_density(root, bodies)
-      call get_pressure_and_sound_speed(bodies)
+      call get_pressure_and_sound_speed(bodies, gamma)
       call find_forces(root, bodies, sinks)
 
       call kick(bodies, sinks, dt)
 
       t = t + dt 
 
-      call get_next_timestep(bodies, dt)
+      call get_next_timestep(bodies, dt, timestep_scale)
 
-      call calc_smoothing(root, bodies)
+      call calc_smoothing(root, bodies, eta, convergence_criteria, max_length)
 
       ! Sink accretion and boundary check
       if (any(sinks%mass > 0.0_dp)) call initiate_sink_accretion(sinks, bodies, root)
-      call check_bounds(bodies)
+      call check_bounds(bodies, bounding_size)
 
 
       deallocate(root) 
@@ -1004,22 +1104,24 @@ end module SPH_routines_module
 program run_sph
   use SPH_routines_module
   implicit none
-  character(len=256) :: filename
-  type(particle), allocatable :: bodies(:) ! Allocatable array to hold all particles in the simulation
+  character(len=256) :: save_filename, parameter_filename
+  type(particle), allocatable :: bodies(:)
   type(sink), allocatable :: sinks(:)
-  ! Initialize the SPH kernel lookup tables (W and dW/dr). This needs to be done once at the start.
+  type(param) :: params
+  !initialise lookup tables 
   call init_kernel_table()
   call init_grav_kernel_table()
   !call omp_set_dynamic(.true.)
-  !print *, "Using", omp_get_max_threads(), "threads"
 
-  filename = 'disc_25k.txt'
-  !read *, filename
-  call read_data_from_file(filename, bodies, sinks)
+
+  save_filename = 'disc_12000_2.txt'
+  parameter_filename = 'parameters.txt'
+
+  call read_params_from_file(parameter_filename, params)
+  call read_data_from_file(save_filename, bodies, sinks)
 
   ! Start the main simulation loop.
-  if (size(sinks) >= 0) then
-    call simulate(bodies,sinks)
-  end if
+  call simulate(bodies,sinks, params)
+
   
 end program run_sph
