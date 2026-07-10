@@ -525,7 +525,7 @@ module SPH_routines_module
     do i = 1, size(bodies)
       old_len = bodies(i)%s_length
       bodies(i)%s_length = bodies(i)%s_length* (1 + ((bodies(i)%mass*((eta/bodies(i)%s_length)**3)/bodies(i)%density) - 1)/(3*bodies(i)%omega)) 
-      if (bodies(i)%s_length < max_length) then
+      if (bodies(i)%s_length < max_length .and. bodies(i)%s_length > 0.01) then
         do while (((bodies(i)%s_length - old_len)/old_len) > convergence_criteria .and. (bodies(i)%s_length < 10.0_dp))
           old_len = bodies(i)%s_length
           bodies(i)%density = 0.0_dp
@@ -546,18 +546,71 @@ module SPH_routines_module
   end subroutine calc_smoothing
 
 !------------------Sink and particle deletion subroutines-----------------
-  subroutine check_bounds(bodies, bounding_size)
+  subroutine check_sink_creation(bodies, sinks, eta)
+    implicit none
+    type(particle), intent(in) :: bodies(:)
+    type(sink), intent(inout), allocatable :: sinks(:)
+    type(sink), allocatable ::new_sinks(:)
+    real(dp), intent(in) :: eta
+    real(dp) :: dr
+    integer :: i, j
+
+
+    do i = 1, size(bodies)
+      if (bodies(i)%mass*((eta/bodies(i)%s_length)**3) > 0.5) then
+        do j = 1, size(sinks)
+          dr = sqrt(sum((sinks(j)%position - bodies(i)%position)**2))
+          if (dr < sinks(j)%radius + 2*bodies(i)%s_length) then
+            return
+          end if
+        end do
+
+        allocate(new_sinks(size(sinks) + 1))
+        
+        do j = 1, size(sinks)
+          new_sinks(j) = sinks(j)
+        end do
+        new_sinks(size(sinks) + 1)%position(1) = bodies(i)%position(1)
+        new_sinks(size(sinks) + 1)%position(2) = bodies(i)%position(2)
+        new_sinks(size(sinks) + 1)%position(3) = bodies(i)%position(3)
+        new_sinks(size(sinks) + 1)%velocity(1) = bodies(i)%velocity(1)
+        new_sinks(size(sinks) + 1)%velocity(2) = bodies(i)%velocity(2)
+        new_sinks(size(sinks) + 1)%velocity(3) = bodies(i)%velocity(3)
+        new_sinks(size(sinks) + 1)%acceleration= 0.0_dp
+        new_sinks(size(sinks) + 1)%spin        = 0.0_dp
+        new_sinks(size(sinks) + 1)%mass        = 0.00000000001_dp
+        new_sinks(size(sinks) + 1)%radius      = 2*bodies(i)%s_length
+      
+        deallocate(sinks)
+      
+        allocate(sinks(size(new_sinks)))
+        do j = 1, size(sinks)
+          sinks(j) = new_sinks(j)
+          print *, sinks(j)%mass
+        end do
+      
+        deallocate(new_sinks)
+      
+        return
+      end if
+    end do
+  end subroutine check_sink_creation
+
+  subroutine check_bounds(bodies, sinks, bounding_size)
     implicit none
     type(particle), allocatable, intent(inout) :: bodies(:)
+    type(sink), allocatable, intent(inout) :: sinks(:)
     real(dp), intent(in) :: bounding_size
     logical :: keep_mask(size(bodies))
+    logical :: keep_mask_sinks(size(sinks))
     integer :: i
 
     ! Create logical mask: .TRUE. for bodies inside bounding box
     keep_mask = [(all(abs(bodies(i)%position) <= bounding_size), i = 1, size(bodies))]
-
+    keep_mask_sinks = [(all(abs(sinks(i)%position) <= bounding_size), i = 1, size(sinks))]
     ! Filter and assign
     bodies = pack(bodies, keep_mask)
+    sinks = pack(sinks, keep_mask_sinks)
   end subroutine check_bounds
 
   subroutine initiate_sink_accretion(sinks, bodies, root)
@@ -613,7 +666,7 @@ module SPH_routines_module
     
     !base case of not needing to recurse
     else if (node%n_particles == 1 .and. all(abs(over_dr) < (sink_i%radius + node%size/2.0_dp))) then
-      dr = sum(sqrt(node%center*node%center - sink_i%position * sink_i%position))
+      dr = sum(sqrt((node%particles(1)%position -  sink_i%position)**2))
       if (dr < sink_i%radius) then
         mask(node%particles%number) = .false.
       end if
@@ -653,7 +706,7 @@ module SPH_routines_module
         bodies(j)%acceleration = bodies(j)%acceleration - (sinks(i)%mass * dist_weighting)
 
         !This is just a bit to apply cooling
-        !bodies(j)%internal_energy_rate = bodies(j)%internal_energy_rate - (bodies(j)%internal_energy - 0.0001) * 0.1
+        !bodies(j)%internal_energy_rate = bodies(j)%internal_energy_rate - 0.25_dp * (bodies(j)%internal_energy - 0.0001)
       end do
     end do
 
@@ -682,7 +735,7 @@ module SPH_routines_module
       ! Variables
       integer :: status, num_lines, i, num_bodies, num_sinks
       character(len=256) :: header_line
-      real(kind=8), allocatable :: x(:), y(:), z(:), vx(:), vy(:), vz(:), energy(:), mass(:), alpha(:)
+      real(kind=8), allocatable :: x(:), y(:), z(:), vx(:), vy(:), vz(:), energy(:), mass(:), alpha(:), smoothing(:)
       type(particle), allocatable, intent(inout) :: bodies(:)
       type(sink), allocatable, intent(inout) :: sinks(:)
 
@@ -714,7 +767,7 @@ module SPH_routines_module
       ! -----------------------
       allocate(x(num_lines), y(num_lines), z(num_lines), &
                vx(num_lines), vy(num_lines), vz(num_lines), &
-               energy(num_lines), mass(num_lines), alpha(num_lines), stat=status)
+               energy(num_lines), mass(num_lines), alpha(num_lines), smoothing(num_lines), stat=status)
       if (status /= 0) then
           write(*,*) 'Error allocating memory for arrays.'
           return
@@ -726,7 +779,7 @@ module SPH_routines_module
       open(unit=10, file=filename, status='old', action='read', iostat=status)
       read(10, '(A)', iostat=status) header_line  ! skip header again
       do i = 1, num_lines
-          read(10, *, iostat=status) x(i), y(i), z(i), vx(i), vy(i), vz(i), energy(i), mass(i)!, alpha(i)
+          read(10, *, iostat=status) x(i), y(i), z(i), vx(i), vy(i), vz(i), energy(i), mass(i), alpha(i), smoothing(i)
           if (status /= 0) then
               write(*,*) 'Error reading line ', i
               exit
@@ -760,9 +813,9 @@ module SPH_routines_module
               bodies(num_bodies)%velocity(2) = vy(i)
               bodies(num_bodies)%velocity(3) = vz(i)
               bodies(num_bodies)%internal_energy = energy(i)
-              bodies(num_bodies)%alpha = 0.0_dp!alpha(i)  !Change to allow reading from saves
+              bodies(num_bodies)%alpha = alpha(i)  !Change to allow reading from saves
               bodies(num_bodies)%alpha_rate = 0.0_dp
-              bodies(num_bodies)%s_length = 4.5_dp
+              bodies(num_bodies)%s_length = smoothing(i)
               bodies(num_bodies)%mass = mass(i)
               bodies(num_bodies)%number = num_bodies
           else
@@ -774,7 +827,7 @@ module SPH_routines_module
               sinks(num_sinks)%velocity(2) = vy(i)
               sinks(num_sinks)%velocity(3) = vz(i)
               sinks(num_sinks)%mass = mass(i)
-              sinks(num_sinks)%radius = 6.0_dp
+              sinks(num_sinks)%radius = 5.0_dp
           end if
       end do
 
@@ -792,7 +845,7 @@ module SPH_routines_module
       ! -----------------------
       ! Clean up
       ! -----------------------
-      deallocate(x, y, z, vx, vy, vz, energy, mass, alpha)
+      deallocate(x, y, z, vx, vy, vz, energy, mass, alpha, smoothing)
 
       write(*,*) 'Successfully read ', size(bodies), ' bodies and ', size(sinks), ' sinks from ', trim(filename), '.'
 
@@ -1011,12 +1064,20 @@ module SPH_routines_module
     end if
   end subroutine get_next_timestep
 
+  subroutine check_sink_merger(sinks)
+    implicit none
+    type(sink), allocatable, intent(inout) :: sinks(:)
+    type(sink), allocatable :: new_sink(:)
+
+    
+  end subroutine check_sink_merger
+
 !-----------------------Simulation Loop Subroutine---------------------------
   subroutine simulate(bodies, sinks, params)
     implicit none
     type(particle), intent(inout), allocatable :: bodies(:) ! Array of all particles in the simulation.
     type(branch), allocatable :: root           ! The root node of the octree. Allocated and deallocated within the loop.
-    type(sink), intent(inout) :: sinks(:)
+    type(sink), intent(inout), allocatable :: sinks(:)
     type(param), intent(in) :: params
     real(dp) :: t, dt, t_list(1000)
     integer :: i, number_bodies , t_test, new_number_bodies
@@ -1045,7 +1106,7 @@ module SPH_routines_module
     t_test = 0 !variable for checking the save number
     t = 0.0_dp         ! Initialize simulation time.
     t_list =  (/((i*end_time / 1000), i=1, 1000)/)
-    dt = 5.0e-5_dp          ! Set time step size.
+    dt = 1.0e-2_dp          ! Set time step size.
     number_bodies = size(bodies) !total number of pariticles
     new_number_bodies = number_bodies
     ! Main simulation loop: continue as long as current time is less than end time.
@@ -1091,8 +1152,11 @@ module SPH_routines_module
       call calc_smoothing(root, bodies, eta, convergence_criteria, max_length)
 
       ! Sink accretion and boundary check
+      call check_sink_creation(bodies, sinks, eta)
+
       if (any(sinks%mass > 0.0_dp)) call initiate_sink_accretion(sinks, bodies, root)
-      call check_bounds(bodies, bounding_size)
+      call check_bounds(bodies, sinks,bounding_size)
+      !call check_sink_merger(sinks)
 
 
       deallocate(root) 
@@ -1114,7 +1178,7 @@ program run_sph
   !call omp_set_dynamic(.true.)
 
 
-  save_filename = 'disc_12000_2.txt'
+  save_filename = 'disc_20k_low_vel.txt'
   parameter_filename = 'parameters.txt'
 
   call read_params_from_file(parameter_filename, params)
