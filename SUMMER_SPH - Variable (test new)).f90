@@ -8,7 +8,7 @@ module SPH_routines_module
   integer, parameter :: nq = 2500  !Number of samples for the SPH kernel lookup tables.
   real(dp), allocatable :: w_table(:), dw_table(:), grav_table(:) !Allocatable arrays to store pre-computed SPH kernel
   real(dp), parameter :: dq = 2.0_dp / nq 
-  real(dp), parameter :: smoothing = 2.5_dp
+  !real(dp), parameter :: smoothing = 2.5_dp
 
   !Represents a single SPH particle with its physical properties.
   type :: particle
@@ -295,7 +295,7 @@ module SPH_routines_module
     integer :: k
 
     direction = p%position - node%mass_center
-    d2   = sum(direction**2) + 0.001_dp*smoothing
+    d2   = sum(direction**2) + 0.001_dp*p%s_length
     dist = sqrt(d2)
 
     if ((node%size / dist) < theta .or. .not. allocated(node%children)) then
@@ -448,6 +448,7 @@ module SPH_routines_module
     logical :: has_children 
 
     has_children = allocated(root%children)
+    !$OMP parallel do default(none) shared(root, body) private(i) schedule(guided)
     do i = 1, size(body)
       body(i)%density = 0.0_dp
       body(i)%omega = 0.0_dp
@@ -456,6 +457,7 @@ module SPH_routines_module
 
       body(i)%omega = 1.0_dp + (body(i)%s_length/(3*body(i)%density)) *body(i)%omega
     end do
+    !$OMP end parallel do
   end subroutine get_density
 
   recursive subroutine density_tree_search(node, body, bodies)
@@ -509,10 +511,12 @@ module SPH_routines_module
     real(dp), intent(in) :: gamma
     integer :: i
 
+    !$OMP parallel do shared(bodies)
     do i = 1, size(bodies)
       bodies(i)%pressure = (gamma - 1.0_dp) * bodies(i)%internal_energy * bodies(i)%density
       bodies(i)%sound_speed = sqrt(gamma*bodies(i)%pressure/bodies(i)%density)
     end do
+    !$OMP end parallel do
   end subroutine
   
 
@@ -701,6 +705,8 @@ module SPH_routines_module
     real(dp), dimension(3) :: vect_dr, dist_weighting
     integer :: i, j
 
+    !$OMP parallel do shared(bodies, sinks) private(i, j)
+
     do i = 1, size(sinks)
       do j = 1, size(bodies)
         vect_dr = bodies(j)%position - sinks(i)%position
@@ -714,8 +720,8 @@ module SPH_routines_module
         !bodies(j)%internal_energy_rate = bodies(j)%internal_energy_rate - 0.25_dp * (bodies(j)%internal_energy - 0.0001)
       end do
     end do
-
-    if (size(sinks) < 2) return
+    !$OMP end parallel do
+    if (size(sinks) <= 1) return
 
     !Bit to deal with Sink-Sink Gravity 
     do i = 1, size(sinks)
