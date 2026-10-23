@@ -1313,6 +1313,7 @@ program run_sph
   use SPH_routines_module
   implicit none
   character(len=256) :: save_filename, parameter_filename
+  logical :: exists_param, exists_save
   type(particle), allocatable :: bodies(:)
   type(sink), allocatable :: sinks(:)
   type(param) :: params
@@ -1321,15 +1322,29 @@ program run_sph
   call init_grav_kernel_table()
   !call omp_set_dynamic(.true.)
 
-
   save_filename = '100AU_Collapse_50k_withweird.txt'
   parameter_filename = 'parameters.txt'
 
-  call read_params_from_file(parameter_filename, params)
-  call read_data_from_file(save_filename, bodies, sinks)
 
-  ! Start the main simulation loop.
-  call simulate(bodies,sinks, params)
+  inquire(file=parameter_filename, exist=exists_param)
+  inquire(file=save_filename, exist=exists_save)
 
-  
+  !check for if there are any of the required inputs
+  if (exists_param) then
+    call read_params_from_file(parameter_filename, params)
+  else 
+    print *, 'Cannot find parameter file ', parameter_filename
+  end if
+
+  if (exists_save) then
+    call read_data_from_file(save_filename, bodies, sinks)
+  else 
+    print *, 'Cannot find initial data file ', save_filename
+  end if
+  ! Start the main simulation loop if all files are present.
+  if (exists_save .and. exists_param) then
+    call simulate(bodies,sinks, params)
+  else
+    print *, 'Cannot Run as missing files'
+  end if
 end program run_sph

@@ -1,3 +1,6 @@
+import numpy as np
+import pandas as pd
+
 # Constants (in appropriate units)
 G = 4 * np.pi**2 #39.47841760435743  # AU^3 / (Msun * yr^2)
 M_star = 5.0           # Msun
@@ -17,6 +20,8 @@ while n < N_particles:
 x = np.array([pos[0] for pos in positions])
 y = np.array([pos[1] for pos in positions])
 z = np.array([pos[2] for pos in positions])
+
+r = np.sqrt(x**2 +y**2 +z**2)
 
 v_circ = 1
 vx = -v_circ * y/r
